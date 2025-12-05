@@ -32,7 +32,7 @@ extraContainers:
       - --label-selector=app.kubernetes.io/name=dragonfly
       - --sync-interval=15s
       # Uncomment for verbose debugging:
-      # - --debug
+      # - --debug=true
     env:
       - name: POD_NAME
         valueFrom:

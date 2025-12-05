@@ -197,7 +197,7 @@ Without service mesh:
 
 ### Debug Logging for Multi-Site
 
-Enable `--debug` flag to see the election reasoning:
+Enable `--debug=true` flag to see the election reasoning:
 
 ```
 NO MASTER DETECTED - Starting election

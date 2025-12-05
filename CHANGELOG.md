@@ -4,7 +4,7 @@
 
 ### Added - Debug Logging & Multi-Site Support
 
-#### Debug Logging (`--debug` flag)
+#### Debug Logging (`--debug=true` flag)
 - Added `--debug` command-line flag for verbose logging
 - Detailed state sync cycle information
 - Election candidate ranking with full details (pod name, UID, namespace, startup time, IP)

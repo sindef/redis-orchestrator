@@ -94,6 +94,27 @@ NAMESPACE=redis ./scripts/test-failover.sh
 # 5. Verify failover succeeded
 ```
 
+## Enable Debug Logging (Optional)
+
+To see detailed election decisions, enable debug mode:
+
+```bash
+# Edit the StatefulSet
+kubectl edit statefulset redis -n redis
+
+# Add to the orchestrator container args:
+args:
+  - --debug=true
+  - --redis-host=localhost
+  # ... other args
+
+# Restart the StatefulSet
+kubectl rollout restart statefulset/redis -n redis
+
+# View debug logs
+kubectl logs -f redis-0 -c orchestrator -n redis
+```
+
 ## Common Issues
 
 ### Pods stuck in "Pending"
@@ -149,6 +170,7 @@ kubectl get secret redis-secret -n redis -o yaml
 - **Production configuration**: See `README.md` for production best practices
 - **TLS setup**: See `deploy/tls-example.yaml`
 - **Multi-site**: See `deploy/multi-site-example.yaml`
+- **DragonflyDB**: See `DRAGONFLYDB.md` for high-performance alternative
 - **Monitoring**: Add Prometheus metrics (coming soon)
 
 ## Quick Commands Reference
@@ -194,4 +216,3 @@ If all checks pass, you're ready for production (after security hardening)!
 - Check logs: `kubectl logs POD_NAME -c orchestrator -n redis`
 - Review design: See `DESIGN.md`
 - Full documentation: See `README.md`
-

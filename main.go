@@ -31,7 +31,7 @@ func main() {
 	flag.StringVar(&cfg.PodName, "pod-name", os.Getenv("POD_NAME"), "Pod name (from downward API)")
 	flag.StringVar(&cfg.Namespace, "namespace", os.Getenv("POD_NAMESPACE"), "Namespace (from downward API)")
 	flag.StringVar(&cfg.LabelSelector, "label-selector", "app=redis", "Label selector to find Redis pods")
-	flag.BoolVar(&cfg.Debug, "debug", false, "Enable debug logging")
+	flag.BoolVar(&cfg.Debug, "debug", false, "Enable debug logging (use --debug=true)")
 	flag.Parse()
 
 	// Override password from env if set

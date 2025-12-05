@@ -54,6 +54,8 @@ spec:
         - --redis-tls=true
         - --label-selector=app=redis
         - --sync-interval=15s
+        # Uncomment for verbose debugging:
+        # - --debug=true
       volumes:
       - name: tls
         secret:

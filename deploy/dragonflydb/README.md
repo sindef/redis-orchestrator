@@ -184,7 +184,7 @@ Enable verbose orchestrator logging:
 ```yaml
 # In extraContainers args:
 args:
-  - --debug
+  - --debug=true
 ```
 
 ### Resource Limits

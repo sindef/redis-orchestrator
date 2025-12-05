@@ -88,8 +88,12 @@ spec:
 
 Enable debug mode to see the election decision-making:
 
-```bash
-kubectl set env statefulset/redis DEBUG_FLAG="--debug" -n redis
+```yaml
+# In your StatefulSet or Helm values, add to args:
+args:
+  - --debug=true
+  - --redis-host=localhost
+  # ... other args
 ```
 
 ### Example Debug Output
@@ -220,7 +224,7 @@ This makes troubleshooting easier (you can see which site a pod belongs to).
 
 ```yaml
 args:
-- --debug
+- --debug=true
 - --redis-host=localhost
 - --redis-port=6379
 ```
@@ -290,8 +294,8 @@ kubectl get nodes -o wide
 ## Command-Line Reference
 
 ```bash
-# Enable debug logging
-kubectl set env statefulset/redis -c orchestrator DEBUG="--debug"
+# Enable debug logging (edit the StatefulSet to add --debug=true to args)
+kubectl edit statefulset/redis
 
 # View master election history
 kubectl logs redis-0 -c orchestrator | grep "ELECTED MASTER"

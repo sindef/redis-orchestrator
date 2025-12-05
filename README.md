@@ -166,7 +166,7 @@ kubectl run -it --rm redis-cli --image=redis:7-alpine --restart=Never -- \
 | `--pod-name` | `POD_NAME` | - | Pod name (required) |
 | `--namespace` | `POD_NAMESPACE` | - | Namespace (required) |
 | `--label-selector` | - | `app=redis` | Label selector for pods |
-| `--debug` | - | `false` | Enable verbose debug logging |
+| `--debug` | - | `false` | Enable verbose debug logging (use `--debug=true`) |
 
 ### TLS Configuration
 
@@ -208,7 +208,7 @@ Enable verbose logging to understand election decisions:
 ```bash
 # Add to container args
 args:
-- --debug
+- --debug=true
 - --redis-host=localhost
 - --redis-port=6379
 ```
@@ -364,8 +364,10 @@ MIT License - see LICENSE file for details
 # Check orchestrator logs with debug info
 kubectl logs -l app=redis -c orchestrator | grep -E "ELECTED|NO MASTER"
 
-# Enable debug logging
-kubectl set env statefulset/redis DEBUG_FLAG="--debug" -c orchestrator
+# Enable debug logging (add to args in StatefulSet)
+kubectl edit statefulset redis
+# Add: - --debug=true
+# Then restart:
 kubectl rollout restart statefulset/redis
 
 # Check pod labels

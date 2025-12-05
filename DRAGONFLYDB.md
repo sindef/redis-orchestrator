@@ -114,7 +114,7 @@ Enable verbose logging to understand election decisions:
 ```yaml
 # In values.yaml extraContainers args:
 args:
-  - --debug
+  - --debug=true
 ```
 
 ## Performance Comparison
