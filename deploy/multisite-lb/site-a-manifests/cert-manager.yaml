@@ -1,0 +1,30 @@
+# Self-signed Certificate Issuer for Redis TLS
+apiVersion: cert-manager.io/v1
+kind: Issuer
+metadata:
+  name: redis-selfsigned-issuer
+  namespace: redis-multisite-a
+spec:
+  selfSigned: {}
+---
+# Certificate for Redis TLS
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: redis-tls
+  namespace: redis-multisite-a
+spec:
+  secretName: redis-tls
+  issuerRef:
+    name: redis-selfsigned-issuer
+    kind: Issuer
+  dnsNames:
+  - redis-0.redis-headless.redis-multisite-a.svc.cluster.local
+  - redis-1.redis-headless.redis-multisite-a.svc.cluster.local
+  - redis.redis-multisite-a.svc.cluster.local
+  - redis-readonly.redis-multisite-a.svc.cluster.local
+  - redis-0.au-southeast-2.example.com
+  - redis-1.au-southeast-2.example.com
+  - "*.redis-multisite-a.svc.cluster.local"
+  commonName: redis.redis-multisite-a.svc.cluster.local
+

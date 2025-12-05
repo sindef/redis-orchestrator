@@ -1,0 +1,218 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+  namespace: redis-multisite-a
+  labels:
+    app: redis
+    site: site-a
+spec:
+  serviceName: redis-headless
+  replicas: 2
+  selector:
+    matchLabels:
+      app: redis
+      site: site-a
+  template:
+    metadata:
+      labels:
+        app: redis
+        site: site-a
+    spec:
+      serviceAccountName: redis-orchestrator
+      securityContext:
+        fsGroup: 1000
+      
+      initContainers:
+      # Configure Redis with password
+      - name: redis-config
+        image: redis:7-alpine
+        command:
+        - sh
+        - -c
+        - |
+          cp /tmp/redis/redis.conf /data/redis.conf
+          echo "masterauth ${REDIS_PASSWORD}" >> /data/redis.conf
+          echo "requirepass ${REDIS_PASSWORD}" >> /data/redis.conf
+        env:
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: redis-password
+              key: password
+        volumeMounts:
+        - name: redis-config
+          mountPath: /tmp/redis
+        - name: data
+          mountPath: /data
+        - name: redis-tls
+          mountPath: /tls
+          readOnly: true
+      
+      containers:
+      # Redis container
+      - name: redis
+        image: redis:7-alpine
+        command:
+        - redis-server
+        - /data/redis.conf
+        ports:
+        - containerPort: 6380
+          name: redis-tls
+          protocol: TCP
+        env:
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: redis-password
+              key: password
+        volumeMounts:
+        - name: data
+          mountPath: /data
+        - name: redis-tls
+          mountPath: /tls
+          readOnly: true
+        resources:
+          requests:
+            cpu: 100m
+            memory: 256Mi
+          limits:
+            cpu: 2000m
+            memory: 2Gi
+        livenessProbe:
+          exec:
+            command:
+            - sh
+            - -c
+            - redis-cli --tls --cert /tls/tls.crt --key /tls/tls.key --cacert /tls/ca.crt -p 6380 -a "${REDIS_PASSWORD}" ping
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          exec:
+            command:
+            - sh
+            - -c
+            - redis-cli --tls --cert /tls/tls.crt --key /tls/tls.key --cacert /tls/ca.crt -p 6380 -a "${REDIS_PASSWORD}" ping
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+      
+      # Redis Orchestrator with Raft
+      - name: orchestrator
+        image: sindef/redis-orchestrator:v1.1.4
+        imagePullPolicy: IfNotPresent
+        args:
+        # Redis connection with TLS
+        - --redis-host=localhost
+        - --redis-port=6380
+        - --redis-service=redis
+        - --redis-tls=true
+        - --redis-tls-ca-cert=/tls/ca.crt
+        - --label-selector=app=redis,site=site-a
+        - --sync-interval=15s
+        
+        # Raft configuration - uses external DNS names via LoadBalancer services
+        # IMPORTANT: Update these DNS names to match your actual LoadBalancer DNS
+        - --election-mode=raft
+        - --raft-bind=0.0.0.0:7000
+        - --raft-peers=redis-0.au-southeast-2.example.com:7000,redis-1.au-southeast-2.example.com:7000,redis-0.au-southeast-1.example.com:7000,redis-1.au-southeast-1.example.com:7000,redis-witness.au-southeast-3.example.com:7000
+        - --raft-data-dir=/var/lib/raft
+        - --debug=true
+        
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: REDIS_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: redis-password
+              key: password
+        - name: SHARED_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: orchestrator-secret
+              key: shared-secret
+        
+        ports:
+        - containerPort: 8080
+          name: http
+          protocol: TCP
+        - containerPort: 7000
+          name: raft
+          protocol: TCP
+        
+        volumeMounts:
+        - name: raft-data
+          mountPath: /var/lib/raft
+        - name: redis-tls
+          mountPath: /tls
+          readOnly: true
+        
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+          limits:
+            cpu: 200m
+            memory: 128Mi
+        
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+      
+      volumes:
+      - name: redis-config
+        configMap:
+          name: redis-config
+      - name: redis-tls
+        secret:
+          secretName: redis-tls
+  
+  volumeClaimTemplates:
+  # Redis data storage
+  - metadata:
+      name: data
+      labels:
+        app: redis
+        site: site-a
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 10Gi
+  
+  # Raft persistent storage
+  - metadata:
+      name: raft-data
+      labels:
+        app: redis-orchestrator
+        site: site-a
+    spec:
+      accessModes: ["ReadWriteOnce"]
+      resources:
+        requests:
+          storage: 1Gi
+

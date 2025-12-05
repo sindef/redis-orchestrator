@@ -1,0 +1,34 @@
+# Individual LoadBalancer service for redis-witness pod
+# This service exposes the witness pod externally for cross-cluster Raft communication
+# The external DNS should be configured to point to this LoadBalancer IP
+# Expected DNS: redis-witness.au-southeast-3.example.com
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-witness-lb
+  namespace: redis-multisite-c
+  labels:
+    app: redis-witness
+    site: site-c
+    pod: redis-witness
+    component: pod-lb
+  annotations:
+    description: "LoadBalancer service for redis-witness pod - exposes Raft port for cross-cluster communication"
+    # Configure external-dns annotation if using external-dns controller
+    # external-dns.alpha.kubernetes.io/hostname: redis-witness.au-southeast-3.example.com
+spec:
+  type: LoadBalancer
+  selector:
+    app: redis-witness
+    site: site-c
+  ports:
+  - name: raft
+    port: 7000
+    targetPort: 7000
+    protocol: TCP
+  - name: orchestrator-http
+    port: 8080
+    targetPort: 8080
+    protocol: TCP
+  sessionAffinity: None
+

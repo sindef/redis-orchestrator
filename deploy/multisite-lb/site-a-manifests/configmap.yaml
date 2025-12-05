@@ -1,0 +1,44 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-config
+  namespace: redis-multisite-a
+  labels:
+    app: redis
+data:
+  redis.conf: |
+    # Redis configuration for Raft-managed multi-site cluster with TLS
+    
+    # TLS Configuration
+    port 0
+    tls-port 6380
+    tls-cert-file /tls/tls.crt
+    tls-key-file /tls/tls.key
+    tls-ca-cert-file /tls/ca.crt
+    tls-auth-clients no
+    tls-protocols "TLSv1.2 TLSv1.3"
+    tls-replication yes
+    
+    # Persistence
+    dir /data
+    appendonly yes
+    appendfilename "appendonly.aof"
+    appendfsync everysec
+    
+    # Replication
+    replica-read-only yes
+    repl-diskless-sync no
+    repl-diskless-sync-delay 5
+    
+    # Performance
+    tcp-backlog 511
+    timeout 0
+    tcp-keepalive 300
+    
+    # Limits
+    maxmemory-policy noeviction
+    
+    # Logging
+    loglevel notice
+    logfile ""
+

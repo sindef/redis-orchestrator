@@ -1,0 +1,37 @@
+# Individual LoadBalancer service for redis-1 pod
+# This service exposes the pod externally for cross-cluster Raft communication
+# The external DNS should be configured to point to this LoadBalancer IP
+# Expected DNS: redis-1.au-southeast-1.example.com
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-1-lb
+  namespace: redis-multisite-b
+  labels:
+    app: redis
+    site: site-b
+    pod: redis-1
+    component: pod-lb
+  annotations:
+    description: "LoadBalancer service for redis-1 pod - exposes Raft port for cross-cluster communication"
+    # Configure external-dns annotation if using external-dns controller
+    # external-dns.alpha.kubernetes.io/hostname: redis-1.au-southeast-1.example.com
+spec:
+  type: LoadBalancer
+  selector:
+    statefulset.kubernetes.io/pod-name: redis-1
+  ports:
+  - name: raft
+    port: 7000
+    targetPort: 7000
+    protocol: TCP
+  - name: orchestrator-http
+    port: 8080
+    targetPort: 8080
+    protocol: TCP
+  - name: redis-tls
+    port: 6380
+    targetPort: 6380
+    protocol: TCP
+  sessionAffinity: None
+
