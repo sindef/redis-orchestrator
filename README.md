@@ -109,6 +109,8 @@ This enables automatic DNS updates through Kubernetes services.
 
 ### Quick Start
 
+### Redis Deployment
+
 1. **Build the Docker image:**
 
 ```bash
@@ -120,6 +122,22 @@ make docker VERSION=v1.0.0
 ```bash
 kubectl apply -f deploy/statefulset.yaml
 ```
+
+### DragonflyDB Deployment
+
+For DragonflyDB (modern Redis-compatible datastore with 25x higher throughput):
+
+```bash
+cd deploy/dragonflydb
+kubectl apply -f rbac.yaml -n dragonfly
+kubectl apply -f service.yaml -n dragonfly
+
+helm install dragonfly dragonfly/dragonfly \
+  --namespace dragonfly \
+  --values values.yaml
+```
+
+See [DRAGONFLYDB.md](DRAGONFLYDB.md) for complete DragonflyDB deployment guide.
 
 3. **Verify deployment:**
 

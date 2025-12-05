@@ -1,0 +1,120 @@
+# DragonflyDB Helm Chart Values with Redis Orchestrator
+# This configuration adds the Redis Orchestrator as a sidecar to DragonflyDB
+
+# Number of replicas - must be 2+ for HA
+replicaCount: 3
+
+image:
+  repository: docker.dragonflydb.io/dragonflydb/dragonfly
+  pullPolicy: IfNotPresent
+  # tag: "v1.14.0"  # Optional: specify version
+
+# Enable persistent storage for StatefulSet
+storage:
+  enabled: true
+  storageClassName: ""  # Use default storage class
+  requests: 10Gi
+
+# Service configuration
+service:
+  type: ClusterIP
+  port: 6379
+
+# Add orchestrator as sidecar container
+extraContainers:
+  - name: orchestrator
+    image: sindef/redis-orchestrator:v1.0.1
+    imagePullPolicy: IfNotPresent
+    args:
+      - --redis-host=localhost
+      - --redis-port=6379
+      - --redis-service=dragonfly
+      - --label-selector=app.kubernetes.io/name=dragonfly
+      - --sync-interval=15s
+      # Uncomment for verbose debugging:
+      # - --debug
+    env:
+      - name: POD_NAME
+        valueFrom:
+          fieldRef:
+            fieldPath: metadata.name
+      - name: POD_NAMESPACE
+        valueFrom:
+          fieldRef:
+            fieldPath: metadata.namespace
+      # If using password authentication:
+      # - name: REDIS_PASSWORD
+      #   valueFrom:
+      #     secretKeyRef:
+      #       name: dragonfly-password
+      #       key: password
+    ports:
+      - containerPort: 8080
+        name: http
+        protocol: TCP
+    resources:
+      requests:
+        cpu: 50m
+        memory: 64Mi
+      limits:
+        cpu: 200m
+        memory: 128Mi
+    livenessProbe:
+      httpGet:
+        path: /health
+        port: 8080
+      initialDelaySeconds: 10
+      periodSeconds: 10
+    readinessProbe:
+      httpGet:
+        path: /health
+        port: 8080
+      initialDelaySeconds: 5
+      periodSeconds: 5
+
+# DragonflyDB configuration
+extraArgs:
+  # Enable replication
+  - --replicaof=dragonfly.default.svc.cluster.local:6379
+  # Uncomment if using authentication
+  # - --requirepass=$(REDIS_PASSWORD)
+  # - --masterauth=$(REDIS_PASSWORD)
+
+# ServiceAccount is created by DragonflyDB chart
+serviceAccount:
+  create: true
+  name: dragonfly-orchestrator
+
+# Resource limits for DragonflyDB
+resources:
+  requests:
+    cpu: 100m
+    memory: 256Mi
+  limits:
+    cpu: 2000m
+    memory: 2Gi
+
+# Probes for DragonflyDB
+probes:
+  livenessProbe:
+    exec:
+      command:
+        - /bin/sh
+        - /usr/local/bin/healthcheck.sh
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+  readinessProbe:
+    exec:
+      command:
+        - /bin/sh
+        - /usr/local/bin/healthcheck.sh
+    initialDelaySeconds: 10
+    periodSeconds: 10
+    timeoutSeconds: 5
+    failureThreshold: 3
+
+# Additional K8s manifests - loaded via extraObjects or separate files
+# See rbac.yaml and service.yaml for required manifests
+

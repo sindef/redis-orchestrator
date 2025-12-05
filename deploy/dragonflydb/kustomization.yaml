@@ -1,0 +1,19 @@
+# Kustomization for DragonflyDB deployment
+# Use this for easy deployment with kubectl
+
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: dragonfly
+
+resources:
+  - rbac.yaml
+  - service.yaml
+  # Uncomment if using password authentication:
+  # - password-secret.yaml
+
+# You can customize the namespace or add common labels
+# commonLabels:
+#   environment: production
+#   managed-by: kustomize
+
