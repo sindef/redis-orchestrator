@@ -1,0 +1,140 @@
+# Example configuration for multi-site Redis deployment
+# This assumes you have two Kubernetes clusters connected via service mesh
+# (like Istio or Linkerd) or VPN with cross-cluster service discovery
+
+---
+# Site 1 Configuration
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: redis-site1
+  labels:
+    site: site1
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+  namespace: redis-site1
+spec:
+  serviceName: redis-headless
+  replicas: 2
+  selector:
+    matchLabels:
+      app: redis
+      site: site1
+  template:
+    metadata:
+      labels:
+        app: redis
+        site: site1
+    spec:
+      serviceAccountName: redis-orchestrator
+      affinity:
+        # Ensure pods run in site1
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: topology.kubernetes.io/zone
+                operator: In
+                values:
+                - site1-zone-a
+                - site1-zone-b
+      containers:
+      - name: redis
+        image: redis:7-alpine
+        # ... (same as main StatefulSet)
+      - name: orchestrator
+        image: redis-orchestrator:latest
+        args:
+        - --redis-host=localhost
+        - --redis-port=6379
+        - --redis-service=redis.redis-global.svc.cluster.local
+        - --label-selector=app=redis
+        - --sync-interval=15s
+        # ... (same as main StatefulSet)
+---
+# Site 2 Configuration
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: redis-site2
+  labels:
+    site: site2
+---
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+  namespace: redis-site2
+spec:
+  serviceName: redis-headless
+  replicas: 2
+  selector:
+    matchLabels:
+      app: redis
+      site: site2
+  template:
+    metadata:
+      labels:
+        app: redis
+        site: site2
+    spec:
+      serviceAccountName: redis-orchestrator
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+            - matchExpressions:
+              - key: topology.kubernetes.io/zone
+                operator: In
+                values:
+                - site2-zone-a
+                - site2-zone-b
+      containers:
+      - name: redis
+        image: redis:7-alpine
+        # ... (same as main StatefulSet)
+      - name: orchestrator
+        image: redis-orchestrator:latest
+        args:
+        - --redis-host=localhost
+        - --redis-port=6379
+        - --redis-service=redis.redis-global.svc.cluster.local
+        - --label-selector=app=redis
+        - --sync-interval=15s
+        # ... (same as main StatefulSet)
+---
+# Global Redis Service (requires service mesh or multi-cluster service)
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: redis-global
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: redis-global
+  annotations:
+    # Example for Istio multi-cluster
+    networking.istio.io/exportTo: "*"
+spec:
+  type: ClusterIP
+  selector:
+    app: redis
+    redis-role: master
+  ports:
+  - name: redis
+    port: 6379
+    targetPort: 6379
+---
+# Notes for multi-site setup:
+# 1. Ensure network connectivity between sites
+# 2. Configure service mesh for cross-cluster service discovery
+# 3. Consider network latency for replication
+# 4. Test failover scenarios thoroughly
+# 5. Monitor replication lag
+# 6. Consider split-brain scenarios during network partitions
+

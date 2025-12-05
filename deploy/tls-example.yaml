@@ -1,0 +1,61 @@
+# Example configuration for Redis with TLS
+# This requires cert-manager or manually created TLS certificates
+
+apiVersion: v1
+kind: Secret
+metadata:
+  name: redis-tls
+  namespace: default
+type: kubernetes.io/tls
+data:
+  # Base64 encoded certificate and key
+  # Generate with cert-manager or manually:
+  # kubectl create secret tls redis-tls --cert=redis.crt --key=redis.key
+  tls.crt: ""
+  tls.key: ""
+  ca.crt: ""
+---
+# Patch for StatefulSet to enable TLS
+# Apply after the main statefulset.yaml
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+  namespace: default
+spec:
+  template:
+    spec:
+      containers:
+      - name: redis
+        command:
+        - redis-server
+        - /data/redis.conf
+        - --tls-port
+        - "6379"
+        - --port
+        - "0"
+        - --tls-cert-file
+        - /tls/tls.crt
+        - --tls-key-file
+        - /tls/tls.key
+        - --tls-ca-cert-file
+        - /tls/ca.crt
+        - --tls-auth-clients
+        - "no"
+        volumeMounts:
+        - name: tls
+          mountPath: /tls
+          readOnly: true
+      - name: orchestrator
+        args:
+        - --redis-host=localhost
+        - --redis-port=6379
+        - --redis-service=redis
+        - --redis-tls=true
+        - --label-selector=app=redis
+        - --sync-interval=15s
+      volumes:
+      - name: tls
+        secret:
+          secretName: redis-tls
+
