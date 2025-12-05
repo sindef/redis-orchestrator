@@ -9,7 +9,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/sindef/redis-orchestrator/pkg/auth"
 	"github.com/sindef/redis-orchestrator/pkg/config"
+	"github.com/sindef/redis-orchestrator/pkg/election"
+	"github.com/sindef/redis-orchestrator/pkg/orchestrator/state"
 	redisclient "github.com/sindef/redis-orchestrator/pkg/redis"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -23,18 +26,6 @@ const (
 	HTTPPort         = 8080
 )
 
-// PodState represents the state of a Redis pod
-type PodState struct {
-	PodName     string    `json:"pod_name"`
-	PodIP       string    `json:"pod_ip"`
-	PodUID      string    `json:"pod_uid"`      // Added for multi-site uniqueness
-	Namespace   string    `json:"namespace"`    // Added for multi-site context
-	IsMaster    bool      `json:"is_master"`
-	IsHealthy   bool      `json:"is_healthy"`
-	StartupTime time.Time `json:"startup_time"`
-	LastSeen    time.Time `json:"last_seen"`
-}
-
 // Orchestrator manages Redis master election and failover
 type Orchestrator struct {
 	config      *config.Config
@@ -45,9 +36,15 @@ type Orchestrator struct {
 	podIP       string
 	podUID      string
 
+	// Election strategy
+	electionStrategy election.Strategy
+
+	// Authentication
+	authenticator *auth.Authenticator
+
 	// State tracking
 	mu         sync.RWMutex
-	peerStates map[string]*PodState // key is pod name
+	peerStates map[string]*state.PodState // key is pod name
 
 	// HTTP server for peer communication
 	httpServer *http.Server
@@ -55,15 +52,22 @@ type Orchestrator struct {
 
 // New creates a new orchestrator
 func New(cfg *config.Config, kubeClient kubernetes.Interface) (*Orchestrator, error) {
-	// Create Redis client
-	redisClient, err := redisclient.NewClient(
-		cfg.RedisHost,
-		cfg.RedisPort,
-		cfg.RedisPassword,
-		cfg.RedisTLS,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create Redis client: %w", err)
+	// Create Redis client (skip in standalone mode)
+	var redisClient *redisclient.Client
+	if !cfg.Standalone {
+		var err error
+		redisClient, err = redisclient.NewClient(
+			cfg.RedisHost,
+			cfg.RedisPort,
+			cfg.RedisPassword,
+			cfg.RedisTLS,
+			cfg.RedisTLSSkipVerify,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to create Redis client: %w", err)
+		}
+	} else {
+		klog.Info("Standalone mode: skipping Redis client creation")
 	}
 
 	// Get pod IP
@@ -76,14 +80,51 @@ func New(cfg *config.Config, kubeClient kubernetes.Interface) (*Orchestrator, er
 		return nil, fmt.Errorf("failed to get pod: %w", err)
 	}
 
+	// Create authenticator
+	authenticator := auth.New(cfg.SharedSecret)
+
+	// Create election strategy based on configuration
+	var electionStrategy election.Strategy
+	switch cfg.ElectionMode {
+	case config.ElectionModeDeterministic, "":
+		electionStrategy = election.NewDeterministicStrategy(
+			cfg.PodName,
+			string(pod.UID),
+			cfg.Debug,
+		)
+		klog.Info("Using deterministic election strategy")
+	case config.ElectionModeRaft:
+		electionStrategy = election.NewRaftStrategy(
+			cfg.PodName,
+			string(pod.UID),
+			pod.Status.PodIP, // Pass pod IP for Raft advertising
+			cfg.RaftBindAddr,
+			cfg.RaftPeers,
+			cfg.RaftDataDir,
+			cfg.RaftBootstrap,
+			cfg.Debug,
+			cfg.Standalone, // Pass standalone flag for witness mode
+			authenticator,
+		)
+		klog.InfoS("Using Raft election strategy", 
+			"podIP", pod.Status.PodIP,
+			"bindAddr", cfg.RaftBindAddr,
+			"peers", cfg.RaftPeers,
+			"bootstrap", cfg.RaftBootstrap)
+	default:
+		return nil, fmt.Errorf("unknown election mode: %s", cfg.ElectionMode)
+	}
+
 	o := &Orchestrator{
-		config:      cfg,
-		kubeClient:  kubeClient,
-		redisClient: redisClient,
-		startupTime: time.Now(),
-		podIP:       pod.Status.PodIP,
-		podUID:      string(pod.UID),
-		peerStates:  make(map[string]*PodState),
+		config:           cfg,
+		kubeClient:       kubeClient,
+		redisClient:      redisClient,
+		startupTime:      time.Now(),
+		podIP:            pod.Status.PodIP,
+		podUID:           string(pod.UID),
+		electionStrategy: electionStrategy,
+		authenticator:    authenticator,
+		peerStates:       make(map[string]*state.PodState),
 	}
 
 	// Setup HTTP server for peer communication
@@ -94,7 +135,15 @@ func New(cfg *config.Config, kubeClient kubernetes.Interface) (*Orchestrator, er
 
 // Run starts the orchestrator main loop
 func (o *Orchestrator) Run(ctx context.Context) error {
-	klog.InfoS("Starting orchestrator", "pod", o.config.PodName, "startupTime", o.startupTime)
+	klog.InfoS("Starting orchestrator", 
+		"pod", o.config.PodName, 
+		"startupTime", o.startupTime,
+		"electionMode", o.config.ElectionMode)
+
+	// Start election strategy
+	if err := o.electionStrategy.Start(ctx); err != nil {
+		return fmt.Errorf("failed to start election strategy: %w", err)
+	}
 
 	// Start HTTP server
 	go func() {
@@ -142,7 +191,7 @@ func (o *Orchestrator) syncState(ctx context.Context) error {
 	}
 
 	if o.config.Debug {
-		klog.InfoS("Local Redis state", 
+		klog.InfoS("Local Redis state",
 			"pod", localState.PodName,
 			"uid", localState.PodUID,
 			"namespace", localState.Namespace,
@@ -179,30 +228,48 @@ func (o *Orchestrator) syncState(ctx context.Context) error {
 }
 
 // getLocalState checks the local Redis instance
-func (o *Orchestrator) getLocalState(ctx context.Context) (*PodState, error) {
+func (o *Orchestrator) getLocalState(ctx context.Context) (*state.PodState, error) {
+	// In standalone mode, report as healthy witness with no Redis state
+	if o.config.Standalone {
+		st := &state.PodState{
+			PodName:     o.config.PodName,
+			PodIP:       o.podIP,
+			PodUID:      o.podUID,
+			Namespace:   o.config.Namespace,
+			IsMaster:    false, // Witness never becomes master
+			IsHealthy:   true,  // Always healthy (no Redis to check)
+			IsWitness:   true,  // Mark as witness node
+			StartupTime: o.startupTime,
+			LastSeen:    time.Now(),
+		}
+		klog.V(2).Info("Standalone witness state")
+		return st, nil
+	}
+
 	info, err := o.redisClient.GetReplicationInfo(ctx)
 	if err != nil {
 		return nil, err
 	}
 
-	state := &PodState{
+	st := &state.PodState{
 		PodName:     o.config.PodName,
 		PodIP:       o.podIP,
 		PodUID:      o.podUID,
 		Namespace:   o.config.Namespace,
 		IsMaster:    info.Role == "master",
 		IsHealthy:   o.redisClient.IsHealthy(ctx),
+		IsWitness:   false, // Not a witness
 		StartupTime: o.startupTime,
 		LastSeen:    time.Now(),
 	}
 
-	klog.V(2).InfoS("Local state", "isMaster", state.IsMaster, "isHealthy", state.IsHealthy)
+	klog.V(2).InfoS("Local state", "isMaster", st.IsMaster, "isHealthy", st.IsHealthy)
 
-	return state, nil
+	return st, nil
 }
 
 // discoverAndQueryPeers finds other orchestrator instances
-func (o *Orchestrator) discoverAndQueryPeers(ctx context.Context) (map[string]*PodState, error) {
+func (o *Orchestrator) discoverAndQueryPeers(ctx context.Context) (map[string]*state.PodState, error) {
 	pods, err := o.kubeClient.CoreV1().Pods(o.config.Namespace).List(ctx, metav1.ListOptions{
 		LabelSelector: o.config.LabelSelector,
 	})
@@ -210,7 +277,7 @@ func (o *Orchestrator) discoverAndQueryPeers(ctx context.Context) (map[string]*P
 		return nil, fmt.Errorf("failed to list pods: %w", err)
 	}
 
-	states := make(map[string]*PodState)
+	states := make(map[string]*state.PodState)
 
 	for _, pod := range pods.Items {
 		// Skip self
@@ -239,12 +306,17 @@ func (o *Orchestrator) discoverAndQueryPeers(ctx context.Context) (map[string]*P
 }
 
 // queryPeer queries another orchestrator instance
-func (o *Orchestrator) queryPeer(ctx context.Context, peerIP string) (*PodState, error) {
+func (o *Orchestrator) queryPeer(ctx context.Context, peerIP string) (*state.PodState, error) {
 	url := fmt.Sprintf("http://%s:%d/state", peerIP, HTTPPort)
 
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
+	}
+
+	// Add authentication to request
+	if err := o.authenticator.SignRequest(req); err != nil {
+		return nil, fmt.Errorf("failed to sign request: %w", err)
 	}
 
 	client := &http.Client{
@@ -261,16 +333,16 @@ func (o *Orchestrator) queryPeer(ctx context.Context, peerIP string) (*PodState,
 		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 
-	var state PodState
-	if err := json.NewDecoder(resp.Body).Decode(&state); err != nil {
+	var st state.PodState
+	if err := json.NewDecoder(resp.Body).Decode(&st); err != nil {
 		return nil, err
 	}
 
-	return &state, nil
+	return &st, nil
 }
 
 // updatePeerStates updates the internal peer state cache
-func (o *Orchestrator) updatePeerStates(localState *PodState, peerStates map[string]*PodState) {
+func (o *Orchestrator) updatePeerStates(localState *state.PodState, peerStates map[string]*state.PodState) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 
@@ -293,12 +365,12 @@ func (o *Orchestrator) updatePeerStates(localState *PodState, peerStates map[str
 }
 
 // reconcile determines if action is needed and performs it
-func (o *Orchestrator) reconcile(ctx context.Context, localState *PodState) error {
+func (o *Orchestrator) reconcile(ctx context.Context, localState *state.PodState) error {
 	o.mu.RLock()
-	allStates := make([]*PodState, 0, len(o.peerStates))
-	for _, state := range o.peerStates {
-		if state.IsHealthy {
-			allStates = append(allStates, state)
+	allStates := make([]*state.PodState, 0, len(o.peerStates))
+	for _, st := range o.peerStates {
+		if st.IsHealthy {
+			allStates = append(allStates, st)
 		}
 	}
 	o.mu.RUnlock()
@@ -310,13 +382,13 @@ func (o *Orchestrator) reconcile(ctx context.Context, localState *PodState) erro
 
 	// Count current masters
 	masterCount := 0
-	var currentMaster *PodState
-	var masters []*PodState
-	for _, state := range allStates {
-		if state.IsMaster {
+	var currentMaster *state.PodState
+	var masters []*state.PodState
+	for _, st := range allStates {
+		if st.IsMaster {
 			masterCount++
-			currentMaster = state
-			masters = append(masters, state)
+			currentMaster = st
+			masters = append(masters, st)
 		}
 	}
 
@@ -324,7 +396,7 @@ func (o *Orchestrator) reconcile(ctx context.Context, localState *PodState) erro
 		klog.InfoS("Reconciliation analysis",
 			"totalHealthyPods", len(allStates),
 			"masterCount", masterCount)
-		
+
 		if masterCount > 0 {
 			klog.Info("Current masters:")
 			for _, m := range masters {
@@ -337,6 +409,11 @@ func (o *Orchestrator) reconcile(ctx context.Context, localState *PodState) erro
 		}
 	} else {
 		klog.V(2).InfoS("Reconcile", "totalPods", len(allStates), "masters", masterCount)
+	}
+
+	// If using Raft, the Redis master should follow the Raft leader
+	if o.config.ElectionMode == config.ElectionModeRaft {
+		return o.handleRaftMode(ctx, localState)
 	}
 
 	// Case 1: No master exists - elect one
@@ -358,7 +435,15 @@ func (o *Orchestrator) reconcile(ctx context.Context, localState *PodState) erro
 }
 
 // handleNoMaster elects a new master when none exists
-func (o *Orchestrator) handleNoMaster(ctx context.Context, allStates []*PodState, localState *PodState) error {
+func (o *Orchestrator) handleNoMaster(ctx context.Context, allStates []*state.PodState, localState *state.PodState) error {
+	// In standalone mode, we don't manage Redis, just participate in Raft
+	if o.config.Standalone {
+		if o.config.Debug {
+			klog.Info("Standalone witness mode - not managing Redis promotion")
+		}
+		return nil
+	}
+
 	if o.config.Debug {
 		klog.Info("========================================")
 		klog.Info("NO MASTER DETECTED - Starting election")
@@ -392,7 +477,7 @@ func (o *Orchestrator) handleNoMaster(ctx context.Context, allStates []*PodState
 	})
 
 	elected := allStates[0]
-	
+
 	if o.config.Debug {
 		klog.Info("Election result:")
 		klog.InfoS("ELECTED MASTER",
@@ -438,30 +523,40 @@ func (o *Orchestrator) handleNoMaster(ctx context.Context, allStates []*PodState
 }
 
 // getElectionReason explains why the elected master was chosen
-func (o *Orchestrator) getElectionReason(sortedStates []*PodState) string {
+func (o *Orchestrator) getElectionReason(sortedStates []*state.PodState) string {
 	if len(sortedStates) < 2 {
 		return "only candidate"
 	}
-	
+
 	elected := sortedStates[0]
 	runner := sortedStates[1]
-	
+
 	if !elected.StartupTime.Equal(runner.StartupTime) {
 		return fmt.Sprintf("oldest startup time (%s vs %s)",
 			elected.StartupTime.Format(time.RFC3339),
 			runner.StartupTime.Format(time.RFC3339))
 	}
-	
+
 	if elected.PodName != runner.PodName {
 		return fmt.Sprintf("tie-breaker: pod name (%s < %s)", elected.PodName, runner.PodName)
 	}
-	
-	return fmt.Sprintf("tie-breaker: pod UID (%s < %s) - multi-site scenario", 
+
+	return fmt.Sprintf("tie-breaker: pod UID (%s < %s) - multi-site scenario",
 		elected.PodUID[:8], runner.PodUID[:8])
 }
 
 // handleSingleMaster ensures correct configuration with one master
-func (o *Orchestrator) handleSingleMaster(ctx context.Context, master *PodState, localState *PodState) error {
+func (o *Orchestrator) handleSingleMaster(ctx context.Context, master *state.PodState, localState *state.PodState) error {
+	// In standalone mode, we don't manage Redis
+	if o.config.Standalone {
+		if o.config.Debug {
+			klog.InfoS("Standalone witness - master exists",
+				"masterPod", master.PodName,
+				"masterUID", master.PodUID)
+		}
+		return nil
+	}
+
 	if o.config.Debug {
 		klog.InfoS("Single master detected",
 			"masterPod", master.PodName,
@@ -497,8 +592,79 @@ func (o *Orchestrator) handleSingleMaster(ctx context.Context, master *PodState,
 	return nil
 }
 
+// handleRaftMode ensures Redis master follows the Raft leader
+func (o *Orchestrator) handleRaftMode(ctx context.Context, localState *state.PodState) error {
+	// In standalone/witness mode, we don't manage Redis
+	if o.config.Standalone {
+		if o.config.Debug {
+			klog.Info("Standalone witness mode - not managing Redis, only participating in Raft")
+		}
+		return nil
+	}
+
+	// Check if we're the Raft leader
+	isRaftLeader := o.electionStrategy.IsLeader()
+	
+	if o.config.Debug {
+		klog.InfoS("Raft mode reconciliation",
+			"isRaftLeader", isRaftLeader,
+			"localIsMaster", localState.IsMaster)
+	}
+
+	// If we're the Raft leader, we should be the Redis master
+	if isRaftLeader {
+		if !localState.IsMaster {
+			if o.config.Debug {
+				klog.Info("We are the Raft leader but not Redis master - promoting")
+			} else {
+				klog.Info("Raft leader detected - promoting to Redis master")
+			}
+			return o.promoteToMaster(ctx)
+		}
+		// We're the leader and already master - ensure label is set
+		if o.config.Debug {
+			klog.Info("We are the Raft leader and Redis master - ensuring label")
+		}
+		return o.ensureMasterLabel(ctx)
+	}
+
+	// We're not the Raft leader, so we should be a replica
+	if localState.IsMaster {
+		// Get the current Raft leader info for logging
+		leaderName, leaderUID, err := o.electionStrategy.GetLeader()
+		if err != nil {
+			if o.config.Debug {
+				klog.InfoS("We are not the Raft leader (leader unknown) - demoting to replica")
+			} else {
+				klog.Info("Not Raft leader - demoting to replica")
+			}
+		} else {
+			if o.config.Debug {
+				klog.InfoS("We are not the Raft leader - demoting to replica",
+					"raftLeader", leaderName,
+					"raftLeaderUID", leaderUID[:8])
+			} else {
+				klog.InfoS("Not Raft leader - demoting to replica", "leader", leaderName)
+			}
+		}
+		return o.demoteToReplica(ctx)
+	}
+
+	// We're correctly configured as replica
+	if o.config.Debug {
+		klog.Info("Correctly configured as replica (not Raft leader)")
+	}
+	return nil
+}
+
 // handleSplitBrain resolves multiple masters
-func (o *Orchestrator) handleSplitBrain(ctx context.Context, allStates []*PodState, localState *PodState) error {
+func (o *Orchestrator) handleSplitBrain(ctx context.Context, allStates []*state.PodState, localState *state.PodState) error {
+	// In standalone mode, we just observe, don't act
+	if o.config.Standalone {
+		klog.Warning("Standalone witness detected split-brain (not managing Redis)")
+		return nil
+	}
+
 	if o.config.Debug {
 		klog.Warning("========================================")
 		klog.Warning("SPLIT BRAIN DETECTED - Multiple masters exist!")
@@ -507,10 +673,10 @@ func (o *Orchestrator) handleSplitBrain(ctx context.Context, allStates []*PodSta
 	}
 
 	// Keep the oldest master, demote others
-	var masters []*PodState
-	for _, state := range allStates {
-		if state.IsMaster {
-			masters = append(masters, state)
+	var masters []*state.PodState
+	for _, st := range allStates {
+		if st.IsMaster {
+			masters = append(masters, st)
 		}
 	}
 
@@ -538,14 +704,14 @@ func (o *Orchestrator) handleSplitBrain(ctx context.Context, allStates []*PodSta
 	})
 
 	keepMaster := masters[0]
-	
+
 	if o.config.Debug {
 		klog.InfoS("Split brain resolution decision",
 			"keepPod", keepMaster.PodName,
 			"keepUID", keepMaster.PodUID,
 			"keepNamespace", keepMaster.Namespace,
 			"reason", o.getElectionReason(masters))
-		
+
 		klog.Info("Masters to demote:")
 		for i := 1; i < len(masters); i++ {
 			klog.InfoS("  Will demote",
@@ -688,8 +854,29 @@ func (o *Orchestrator) removeMasterLabel(ctx context.Context) error {
 // setupHTTPServer configures the HTTP server for peer communication
 func (o *Orchestrator) setupHTTPServer() {
 	mux := http.NewServeMux()
-	mux.HandleFunc("/state", o.handleStateRequest)
+	
+	// Add authentication middleware to state endpoint
+	mux.HandleFunc("/state", o.authenticator.Middleware(o.handleStateRequest))
 	mux.HandleFunc("/health", o.handleHealthRequest)
+
+	// Add Raft-specific endpoints if using Raft
+	if o.config.ElectionMode == config.ElectionModeRaft {
+		if raftStrategy, ok := o.electionStrategy.(interface {
+			HandleRaftStatus(http.ResponseWriter, *http.Request)
+			HandleAddVoter(http.ResponseWriter, *http.Request)
+			HandleAddNonvoter(http.ResponseWriter, *http.Request)
+			HandleRaftPeers(http.ResponseWriter, *http.Request)
+		}); ok {
+			mux.HandleFunc("/raft/status", o.authenticator.Middleware(raftStrategy.HandleRaftStatus))
+			mux.HandleFunc("/raft/add-voter", o.authenticator.Middleware(raftStrategy.HandleAddVoter))
+			mux.HandleFunc("/raft/add-nonvoter", o.authenticator.Middleware(raftStrategy.HandleAddNonvoter))
+			mux.HandleFunc("/raft/peers", o.authenticator.Middleware(raftStrategy.HandleRaftPeers))
+			
+			if o.config.Debug {
+				klog.Info("Registered Raft HTTP endpoints: /raft/status, /raft/add-voter, /raft/add-nonvoter, /raft/peers")
+			}
+		}
+	}
 
 	o.httpServer = &http.Server{
 		Addr:    fmt.Sprintf(":%d", HTTPPort),
@@ -701,7 +888,7 @@ func (o *Orchestrator) setupHTTPServer() {
 func (o *Orchestrator) handleStateRequest(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	state, err := o.getLocalState(ctx)
+	st, err := o.getLocalState(ctx)
 	if err != nil {
 		klog.ErrorS(err, "Failed to get local state for HTTP request")
 		http.Error(w, "Failed to get state", http.StatusInternalServerError)
@@ -709,7 +896,7 @@ func (o *Orchestrator) handleStateRequest(w http.ResponseWriter, r *http.Request
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(state)
+	json.NewEncoder(w).Encode(st)
 }
 
 // handleHealthRequest returns health status
@@ -722,6 +909,11 @@ func (o *Orchestrator) handleHealthRequest(w http.ResponseWriter, r *http.Reques
 func (o *Orchestrator) shutdown() error {
 	klog.Info("Shutting down orchestrator")
 
+	// Stop election strategy
+	if err := o.electionStrategy.Stop(); err != nil {
+		klog.ErrorS(err, "Failed to stop election strategy")
+	}
+
 	// Shutdown HTTP server
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -730,9 +922,11 @@ func (o *Orchestrator) shutdown() error {
 		klog.ErrorS(err, "Failed to shutdown HTTP server")
 	}
 
-	// Close Redis client
-	if err := o.redisClient.Close(); err != nil {
-		klog.ErrorS(err, "Failed to close Redis client")
+	// Close Redis client (if exists)
+	if o.redisClient != nil {
+		if err := o.redisClient.Close(); err != nil {
+			klog.ErrorS(err, "Failed to close Redis client")
+		}
 	}
 
 	return nil

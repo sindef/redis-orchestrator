@@ -1,0 +1,100 @@
+# Witness Node Deployment
+# Lightweight Raft participant without Redis instance
+# Use this as a tie-breaker in multi-site deployments
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-witness
+  namespace: redis-raft
+  labels:
+    app: redis-witness
+    component: witness
+spec:
+  replicas: 1  # Usually just 1 witness needed
+  selector:
+    matchLabels:
+      app: redis-witness
+  template:
+    metadata:
+      labels:
+        app: redis-witness
+        component: witness
+    spec:
+      serviceAccountName: redis-orchestrator
+      containers:
+      # Orchestrator in standalone/witness mode
+      - name: orchestrator
+        image: sindef/redis-orchestrator:v1.0.3
+        imagePullPolicy: IfNotPresent
+        args:
+        # Witness mode
+        - --standalone=true
+        
+        # Election configuration
+        - --election-mode=raft
+        - --raft-bind=0.0.0.0:7000
+        - --raft-peers=redis-0.redis-headless.redis-raft.svc.cluster.local:7000,redis-1.redis-headless.redis-raft.svc.cluster.local:7000,redis-2.redis-headless.redis-raft.svc.cluster.local:7000,redis-witness.redis-headless.redis-raft.svc.cluster.local:7000
+        - --raft-data-dir=/var/lib/raft
+        
+        # Kubernetes settings (still needed for pod discovery)
+        - --label-selector=app=redis
+        - --sync-interval=15s
+        
+        # Uncomment for verbose debugging:
+        # - --debug=true
+        
+        env:
+        - name: POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
+        - name: POD_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
+        - name: SHARED_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: orchestrator-secret
+              key: shared-secret
+        
+        ports:
+        - containerPort: 8080
+          name: http
+          protocol: TCP
+        - containerPort: 7000
+          name: raft
+          protocol: TCP
+        
+        volumeMounts:
+        - name: raft-data
+          mountPath: /var/lib/raft
+        
+        resources:
+          requests:
+            cpu: 25m
+            memory: 32Mi
+          limits:
+            cpu: 100m
+            memory: 64Mi
+        
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      
+      volumes:
+      - name: raft-data
+        emptyDir: {}  # Can use PVC for persistence if needed
+

@@ -28,7 +28,7 @@ type ReplicationInfo struct {
 }
 
 // NewClient creates a new Redis client
-func NewClient(host string, port int, password string, useTLS bool) (*Client, error) {
+func NewClient(host string, port int, password string, useTLS bool, skipVerify bool) (*Client, error) {
 	opts := &redis.Options{
 		Addr:     fmt.Sprintf("%s:%d", host, port),
 		Password: password,
@@ -37,7 +37,11 @@ func NewClient(host string, port int, password string, useTLS bool) (*Client, er
 
 	if useTLS {
 		opts.TLSConfig = &tls.Config{
-			MinVersion: tls.VersionTLS12,
+			MinVersion:         tls.VersionTLS12,
+			InsecureSkipVerify: skipVerify,
+		}
+		if skipVerify {
+			klog.Warning("TLS certificate verification is disabled - not recommended for production")
 		}
 	}
 

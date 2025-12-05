@@ -4,18 +4,20 @@ import (
 	"sort"
 	"testing"
 	"time"
+
+	"github.com/sindef/redis-orchestrator/pkg/orchestrator/state"
 )
 
 func TestLeaderElectionByStartupTime(t *testing.T) {
 	now := time.Now()
 	tests := []struct {
 		name     string
-		states   []*PodState
+		states   []*state.PodState
 		expected string
 	}{
 		{
 			name: "oldest pod elected",
-			states: []*PodState{
+			states: []*state.PodState{
 				{
 					PodName:     "redis-0",
 					PodUID:      "uid-0",
@@ -39,7 +41,7 @@ func TestLeaderElectionByStartupTime(t *testing.T) {
 		},
 		{
 			name: "newest pod with oldest in middle",
-			states: []*PodState{
+			states: []*state.PodState{
 				{
 					PodName:     "redis-0",
 					PodUID:      "uid-0",
@@ -63,7 +65,7 @@ func TestLeaderElectionByStartupTime(t *testing.T) {
 		},
 		{
 			name: "single pod",
-			states: []*PodState{
+			states: []*state.PodState{
 				{
 					PodName:     "redis-0",
 					PodUID:      "uid-0",
@@ -100,12 +102,12 @@ func TestStartupTimeTieBreaker(t *testing.T) {
 	now := time.Now()
 	tests := []struct {
 		name     string
-		states   []*PodState
+		states   []*state.PodState
 		expected string
 	}{
 		{
 			name: "identical startup times, lexicographic order",
-			states: []*PodState{
+			states: []*state.PodState{
 				{
 					PodName:     "redis-2",
 					PodUID:      "uid-2",
@@ -129,7 +131,7 @@ func TestStartupTimeTieBreaker(t *testing.T) {
 		},
 		{
 			name: "two pods same time",
-			states: []*PodState{
+			states: []*state.PodState{
 				{
 					PodName:     "redis-b",
 					PodUID:      "uid-b",
@@ -147,7 +149,7 @@ func TestStartupTimeTieBreaker(t *testing.T) {
 		},
 		{
 			name: "mixed times with ties",
-			states: []*PodState{
+			states: []*state.PodState{
 				{
 					PodName:     "redis-2",
 					PodUID:      "uid-2",
@@ -196,13 +198,13 @@ func TestMultiSiteScenario(t *testing.T) {
 	now := time.Now()
 	tests := []struct {
 		name        string
-		states      []*PodState
+		states      []*state.PodState
 		expectedPod string
 		expectedUID string
 	}{
 		{
 			name: "same pod name different sites - UID tie-breaker",
-			states: []*PodState{
+			states: []*state.PodState{
 				{
 					PodName:     "redis-0",
 					PodUID:      "uid-site2-abc",
@@ -223,7 +225,7 @@ func TestMultiSiteScenario(t *testing.T) {
 		},
 		{
 			name: "same pod name, different startup times",
-			states: []*PodState{
+			states: []*state.PodState{
 				{
 					PodName:     "redis-0",
 					PodUID:      "uid-site2",
@@ -244,7 +246,7 @@ func TestMultiSiteScenario(t *testing.T) {
 		},
 		{
 			name: "complex multi-site with 4 pods",
-			states: []*PodState{
+			states: []*state.PodState{
 				{
 					PodName:     "redis-0",
 					PodUID:      "aaa-site1",
@@ -307,12 +309,12 @@ func TestSplitBrainResolution(t *testing.T) {
 	now := time.Now()
 	tests := []struct {
 		name     string
-		states   []*PodState
+		states   []*state.PodState
 		expected string
 	}{
 		{
 			name: "two masters, keep oldest",
-			states: []*PodState{
+			states: []*state.PodState{
 				{
 					PodName:     "redis-0",
 					PodUID:      "uid-0",
@@ -339,7 +341,7 @@ func TestSplitBrainResolution(t *testing.T) {
 		},
 		{
 			name: "three masters, keep oldest",
-			states: []*PodState{
+			states: []*state.PodState{
 				{
 					PodName:     "redis-0",
 					PodUID:      "uid-0",
@@ -369,7 +371,7 @@ func TestSplitBrainResolution(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Filter only masters
-			var masters []*PodState
+			var masters []*state.PodState
 			for _, state := range tt.states {
 				if state.IsMaster {
 					masters = append(masters, state)
@@ -399,13 +401,13 @@ func TestHealthyPodFiltering(t *testing.T) {
 	now := time.Now()
 	tests := []struct {
 		name          string
-		states        []*PodState
+		states        []*state.PodState
 		expectedCount int
 		expectedFirst string
 	}{
 		{
 			name: "filter out unhealthy pods",
-			states: []*PodState{
+			states: []*state.PodState{
 				{
 					PodName:     "redis-0",
 					PodUID:      "uid-0",
@@ -430,7 +432,7 @@ func TestHealthyPodFiltering(t *testing.T) {
 		},
 		{
 			name: "all healthy",
-			states: []*PodState{
+			states: []*state.PodState{
 				{
 					PodName:     "redis-0",
 					PodUID:      "uid-0",
@@ -449,7 +451,7 @@ func TestHealthyPodFiltering(t *testing.T) {
 		},
 		{
 			name: "all unhealthy",
-			states: []*PodState{
+			states: []*state.PodState{
 				{
 					PodName:     "redis-0",
 					PodUID:      "uid-0",
@@ -468,7 +470,7 @@ func TestHealthyPodFiltering(t *testing.T) {
 		},
 		{
 			name: "mixed health, oldest is unhealthy",
-			states: []*PodState{
+			states: []*state.PodState{
 				{
 					PodName:     "redis-0",
 					PodUID:      "uid-0",
@@ -496,7 +498,7 @@ func TestHealthyPodFiltering(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Filter healthy pods
-			var healthy []*PodState
+			var healthy []*state.PodState
 			for _, state := range tt.states {
 				if state.IsHealthy {
 					healthy = append(healthy, state)
@@ -531,14 +533,14 @@ func TestMasterCountScenarios(t *testing.T) {
 	now := time.Now()
 	tests := []struct {
 		name            string
-		states          []*PodState
+		states          []*state.PodState
 		masterCount     int
 		needsElection   bool
 		needsResolution bool
 	}{
 		{
 			name: "no masters",
-			states: []*PodState{
+			states: []*state.PodState{
 				{PodName: "redis-0", PodUID: "uid-0", IsMaster: false, IsHealthy: true, StartupTime: now.Add(-10 * time.Minute)},
 				{PodName: "redis-1", PodUID: "uid-1", IsMaster: false, IsHealthy: true, StartupTime: now.Add(-5 * time.Minute)},
 			},
@@ -548,7 +550,7 @@ func TestMasterCountScenarios(t *testing.T) {
 		},
 		{
 			name: "one master",
-			states: []*PodState{
+			states: []*state.PodState{
 				{PodName: "redis-0", PodUID: "uid-0", IsMaster: true, IsHealthy: true, StartupTime: now.Add(-10 * time.Minute)},
 				{PodName: "redis-1", PodUID: "uid-1", IsMaster: false, IsHealthy: true, StartupTime: now.Add(-5 * time.Minute)},
 			},
@@ -558,7 +560,7 @@ func TestMasterCountScenarios(t *testing.T) {
 		},
 		{
 			name: "multiple masters (split brain)",
-			states: []*PodState{
+			states: []*state.PodState{
 				{PodName: "redis-0", PodUID: "uid-0", IsMaster: true, IsHealthy: true, StartupTime: now.Add(-10 * time.Minute)},
 				{PodName: "redis-1", PodUID: "uid-1", IsMaster: true, IsHealthy: true, StartupTime: now.Add(-5 * time.Minute)},
 			},
@@ -621,9 +623,9 @@ func TestEvenNumberOfReplicas(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Create N replicas with same startup time
-			states := make([]*PodState, tt.count)
+			states := make([]*state.PodState, tt.count)
 			for i := 0; i < tt.count; i++ {
-				states[i] = &PodState{
+				states[i] = &state.PodState{
 					PodName:     "redis-" + string(rune('0'+i)),
 					PodUID:      "uid-" + string(rune('0'+i)),
 					StartupTime: now,
@@ -655,7 +657,7 @@ func TestStaleStateRemoval(t *testing.T) {
 	now := time.Now()
 	staleThreshold := now.Add(-60 * time.Second)
 
-	states := map[string]*PodState{
+	states := map[string]*state.PodState{
 		"redis-0": {
 			PodName:  "redis-0",
 			PodUID:   "uid-0",
