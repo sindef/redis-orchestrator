@@ -1,0 +1,9 @@
+*.md
+.git
+.gitignore
+deploy/
+*.yaml
+*.yml
+Dockerfile
+.dockerignore
+
