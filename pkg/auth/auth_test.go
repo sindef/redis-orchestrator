@@ -43,7 +43,6 @@ func TestAuthenticator(t *testing.T) {
 			t.Fatalf("Failed to sign request: %v", err)
 		}
 
-		// Tamper with signature
 		req.Header.Set(HeaderSignature, "invalid")
 
 		err = auth.ValidateRequest(req)
@@ -106,7 +105,6 @@ func TestClockSkew(t *testing.T) {
 
 	req := httptest.NewRequest("GET", "/state", nil)
 	
-	// Set timestamp 60 seconds in the past (beyond MaxClockSkew)
 	oldTimestamp := time.Now().Add(-60 * time.Second).Unix()
 	req.Header.Set(HeaderTimestamp, string(rune(oldTimestamp)))
 	req.Header.Set(HeaderSignature, auth.generateSignature("GET", "/state", oldTimestamp))

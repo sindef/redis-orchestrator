@@ -11,30 +11,29 @@ import (
 )
 
 const (
-	// HeaderTimestamp is the HTTP header for timestamp
 	HeaderTimestamp = "X-Orchestrator-Timestamp"
-	// HeaderSignature is the HTTP header for HMAC signature
 	HeaderSignature = "X-Orchestrator-Signature"
-	// MaxClockSkew is the maximum allowed time difference
+	// MaxClockSkew prevents replay attacks by rejecting requests with timestamps
+	// too far from the current time. This window accounts for reasonable clock
+	// differences between client and server.
 	MaxClockSkew = 30 * time.Second
 )
 
-// Authenticator handles request authentication
 type Authenticator struct {
 	sharedSecret string
 }
 
-// New creates a new authenticator with the given shared secret
 func New(sharedSecret string) *Authenticator {
 	return &Authenticator{
 		sharedSecret: sharedSecret,
 	}
 }
 
-// SignRequest adds authentication headers to an HTTP request
 func (a *Authenticator) SignRequest(req *http.Request) error {
+	// Allow requests to proceed without signing if no secret is configured.
+	// This enables graceful degradation when auth is disabled.
 	if a.sharedSecret == "" {
-		return nil // No authentication required
+		return nil
 	}
 
 	timestamp := time.Now().Unix()
@@ -46,13 +45,13 @@ func (a *Authenticator) SignRequest(req *http.Request) error {
 	return nil
 }
 
-// ValidateRequest validates the authentication headers on an HTTP request
 func (a *Authenticator) ValidateRequest(req *http.Request) error {
+	// Skip validation if no secret is configured, allowing the system to
+	// operate without authentication when needed.
 	if a.sharedSecret == "" {
-		return nil // No authentication required
+		return nil
 	}
 
-	// Get timestamp
 	timestampStr := req.Header.Get(HeaderTimestamp)
 	if timestampStr == "" {
 		return fmt.Errorf("missing timestamp header")
@@ -63,7 +62,8 @@ func (a *Authenticator) ValidateRequest(req *http.Request) error {
 		return fmt.Errorf("invalid timestamp: %w", err)
 	}
 
-	// Check clock skew
+	// Check timestamp to prevent replay attacks. The absolute difference
+	// handles both future and past timestamps (e.g., from clock drift).
 	now := time.Now().Unix()
 	diff := now - timestamp
 	if diff < 0 {
@@ -73,10 +73,11 @@ func (a *Authenticator) ValidateRequest(req *http.Request) error {
 		return fmt.Errorf("timestamp outside allowed window (skew: %ds)", diff)
 	}
 
-	// Validate signature
 	expectedSig := a.generateSignature(req.Method, req.URL.Path, timestamp)
 	actualSig := req.Header.Get(HeaderSignature)
 
+	// Use hmac.Equal instead of == to prevent timing attacks that could
+	// leak information about the expected signature.
 	if !hmac.Equal([]byte(expectedSig), []byte(actualSig)) {
 		return fmt.Errorf("invalid signature")
 	}
@@ -84,7 +85,6 @@ func (a *Authenticator) ValidateRequest(req *http.Request) error {
 	return nil
 }
 
-// Middleware returns an HTTP middleware that validates authentication
 func (a *Authenticator) Middleware(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if err := a.ValidateRequest(r); err != nil {
@@ -95,11 +95,12 @@ func (a *Authenticator) Middleware(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// generateSignature creates an HMAC-SHA256 signature
+// generateSignature creates an HMAC-SHA256 signature over the request method,
+// path, and timestamp. The message format "method:path:timestamp" must remain
+// consistent for signature validation to work correctly.
 func (a *Authenticator) generateSignature(method, path string, timestamp int64) string {
 	message := fmt.Sprintf("%s:%s:%d", method, path, timestamp)
 	mac := hmac.New(sha256.New, []byte(a.sharedSecret))
 	mac.Write([]byte(message))
 	return hex.EncodeToString(mac.Sum(nil))
 }
-
