@@ -149,7 +149,7 @@ spec:
           periodSeconds: 5
       # Orchestrator sidecar
       - name: orchestrator
-        image: sindef/redis-orchestrator:v1.0.2
+        image: sindef/redis-orchestrator:v1.1.4
         imagePullPolicy: IfNotPresent
         args:
         - --redis-host=localhost

@@ -94,7 +94,7 @@ spec:
       
       # Redis Orchestrator with Raft
       - name: orchestrator
-        image: sindef/redis-orchestrator:v1.1.3
+        image: sindef/redis-orchestrator:v1.1.4
         imagePullPolicy: IfNotPresent
         args:
         # Redis connection
