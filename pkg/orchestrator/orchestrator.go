@@ -462,15 +462,36 @@ func (o *Orchestrator) getElectionReason(sortedStates []*PodState) string {
 
 // handleSingleMaster ensures correct configuration with one master
 func (o *Orchestrator) handleSingleMaster(ctx context.Context, master *PodState, localState *PodState) error {
+	if o.config.Debug {
+		klog.InfoS("Single master detected",
+			"masterPod", master.PodName,
+			"masterUID", master.PodUID,
+			"masterNamespace", master.Namespace,
+			"weAreMaster", master.PodUID == o.podUID)
+	}
+	
 	// If we are the master, ensure pod label is set
-	if master.PodName == o.config.PodName {
+	if master.PodUID == o.podUID {
+		if o.config.Debug {
+			klog.Info("We are the master - ensuring label is set")
+		}
 		return o.ensureMasterLabel(ctx)
 	}
 
 	// We are not the master - ensure we're configured as replica
 	if localState.IsMaster {
-		klog.InfoS("We are master but should not be", "correctMaster", master.PodName)
+		if o.config.Debug {
+			klog.InfoS("We are master but should not be - demoting",
+				"correctMaster", master.PodName,
+				"correctMasterUID", master.PodUID)
+		} else {
+			klog.InfoS("We are master but should not be", "correctMaster", master.PodName)
+		}
 		return o.demoteToReplica(ctx)
+	}
+
+	if o.config.Debug {
+		klog.Info("Correctly configured as replica")
 	}
 
 	return nil
@@ -478,7 +499,12 @@ func (o *Orchestrator) handleSingleMaster(ctx context.Context, master *PodState,
 
 // handleSplitBrain resolves multiple masters
 func (o *Orchestrator) handleSplitBrain(ctx context.Context, allStates []*PodState, localState *PodState) error {
-	klog.Warning("Split brain detected - multiple masters exist")
+	if o.config.Debug {
+		klog.Warning("========================================")
+		klog.Warning("SPLIT BRAIN DETECTED - Multiple masters exist!")
+	} else {
+		klog.Warning("Split brain detected - multiple masters exist")
+	}
 
 	// Keep the oldest master, demote others
 	var masters []*PodState
@@ -488,19 +514,63 @@ func (o *Orchestrator) handleSplitBrain(ctx context.Context, allStates []*PodSta
 		}
 	}
 
+	if o.config.Debug {
+		klog.InfoS("Split brain masters", "count", len(masters))
+		for i, m := range masters {
+			klog.InfoS("Master",
+				"index", i,
+				"pod", m.PodName,
+				"uid", m.PodUID,
+				"namespace", m.Namespace,
+				"startupTime", m.StartupTime.Format(time.RFC3339))
+		}
+	}
+
+	// Sort using same logic as election
 	sort.Slice(masters, func(i, j int) bool {
 		if masters[i].StartupTime.Equal(masters[j].StartupTime) {
+			if masters[i].PodName == masters[j].PodName {
+				return masters[i].PodUID < masters[j].PodUID
+			}
 			return masters[i].PodName < masters[j].PodName
 		}
 		return masters[i].StartupTime.Before(masters[j].StartupTime)
 	})
 
 	keepMaster := masters[0]
-	klog.InfoS("Resolving split brain, keeping master", "pod", keepMaster.PodName)
+	
+	if o.config.Debug {
+		klog.InfoS("Split brain resolution decision",
+			"keepPod", keepMaster.PodName,
+			"keepUID", keepMaster.PodUID,
+			"keepNamespace", keepMaster.Namespace,
+			"reason", o.getElectionReason(masters))
+		
+		klog.Info("Masters to demote:")
+		for i := 1; i < len(masters); i++ {
+			klog.InfoS("  Will demote",
+				"pod", masters[i].PodName,
+				"uid", masters[i].PodUID,
+				"namespace", masters[i].Namespace)
+		}
+	} else {
+		klog.InfoS("Resolving split brain, keeping master", "pod", keepMaster.PodName)
+	}
 
 	// If we are not the chosen master but currently master, demote
-	if localState.IsMaster && localState.PodName != keepMaster.PodName {
+	if localState.IsMaster && localState.PodUID != keepMaster.PodUID {
+		if o.config.Debug {
+			klog.Warning("WE MUST DEMOTE - We are not the chosen master")
+		}
 		return o.demoteToReplica(ctx)
+	}
+
+	if o.config.Debug {
+		if localState.IsMaster {
+			klog.Info("We are the chosen master - keeping role")
+		} else {
+			klog.Info("We are correctly a replica")
+		}
 	}
 
 	return nil
@@ -508,11 +578,23 @@ func (o *Orchestrator) handleSplitBrain(ctx context.Context, allStates []*PodSta
 
 // promoteToMaster promotes this instance to master
 func (o *Orchestrator) promoteToMaster(ctx context.Context) error {
-	klog.Info("Promoting to master")
+	if o.config.Debug {
+		klog.Info("========================================")
+		klog.InfoS("PROMOTING TO MASTER",
+			"pod", o.config.PodName,
+			"uid", o.podUID,
+			"namespace", o.config.Namespace)
+	} else {
+		klog.Info("Promoting to master")
+	}
 
 	// First, set Redis to master
 	if err := o.redisClient.PromoteToMaster(ctx); err != nil {
 		return err
+	}
+
+	if o.config.Debug {
+		klog.Info("Redis promotion successful, setting pod label")
 	}
 
 	// Then, set pod label
@@ -521,11 +603,26 @@ func (o *Orchestrator) promoteToMaster(ctx context.Context) error {
 
 // demoteToReplica demotes this instance to replica
 func (o *Orchestrator) demoteToReplica(ctx context.Context) error {
-	klog.Info("Demoting to replica")
+	if o.config.Debug {
+		klog.Info("========================================")
+		klog.InfoS("DEMOTING TO REPLICA",
+			"pod", o.config.PodName,
+			"uid", o.podUID,
+			"namespace", o.config.Namespace,
+			"masterService", o.config.RedisServiceName)
+	} else {
+		klog.Info("Demoting to replica")
+	}
 
 	// Remove master label
 	if err := o.removeMasterLabel(ctx); err != nil {
 		klog.ErrorS(err, "Failed to remove master label")
+	}
+
+	if o.config.Debug {
+		klog.InfoS("Removed master label, configuring replication",
+			"masterService", o.config.RedisServiceName,
+			"port", o.config.RedisPort)
 	}
 
 	// Set as replica of service

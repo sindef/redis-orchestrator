@@ -18,16 +18,19 @@ func TestLeaderElectionByStartupTime(t *testing.T) {
 			states: []*PodState{
 				{
 					PodName:     "redis-0",
+					PodUID:      "uid-0",
 					StartupTime: now.Add(-10 * time.Minute),
 					IsHealthy:   true,
 				},
 				{
 					PodName:     "redis-1",
+					PodUID:      "uid-1",
 					StartupTime: now.Add(-5 * time.Minute),
 					IsHealthy:   true,
 				},
 				{
 					PodName:     "redis-2",
+					PodUID:      "uid-2",
 					StartupTime: now.Add(-1 * time.Minute),
 					IsHealthy:   true,
 				},
@@ -39,16 +42,19 @@ func TestLeaderElectionByStartupTime(t *testing.T) {
 			states: []*PodState{
 				{
 					PodName:     "redis-0",
+					PodUID:      "uid-0",
 					StartupTime: now.Add(-5 * time.Minute),
 					IsHealthy:   true,
 				},
 				{
 					PodName:     "redis-1",
+					PodUID:      "uid-1",
 					StartupTime: now.Add(-10 * time.Minute),
 					IsHealthy:   true,
 				},
 				{
 					PodName:     "redis-2",
+					PodUID:      "uid-2",
 					StartupTime: now.Add(-1 * time.Minute),
 					IsHealthy:   true,
 				},
@@ -60,6 +66,7 @@ func TestLeaderElectionByStartupTime(t *testing.T) {
 			states: []*PodState{
 				{
 					PodName:     "redis-0",
+					PodUID:      "uid-0",
 					StartupTime: now,
 					IsHealthy:   true,
 				},
@@ -70,9 +77,12 @@ func TestLeaderElectionByStartupTime(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Sort by startup time (oldest first), then by pod name
+			// Sort by startup time (oldest first), then by pod name, then by UID
 			sort.Slice(tt.states, func(i, j int) bool {
 				if tt.states[i].StartupTime.Equal(tt.states[j].StartupTime) {
+					if tt.states[i].PodName == tt.states[j].PodName {
+						return tt.states[i].PodUID < tt.states[j].PodUID
+					}
 					return tt.states[i].PodName < tt.states[j].PodName
 				}
 				return tt.states[i].StartupTime.Before(tt.states[j].StartupTime)
@@ -98,16 +108,19 @@ func TestStartupTimeTieBreaker(t *testing.T) {
 			states: []*PodState{
 				{
 					PodName:     "redis-2",
+					PodUID:      "uid-2",
 					StartupTime: now,
 					IsHealthy:   true,
 				},
 				{
 					PodName:     "redis-0",
+					PodUID:      "uid-0",
 					StartupTime: now,
 					IsHealthy:   true,
 				},
 				{
 					PodName:     "redis-1",
+					PodUID:      "uid-1",
 					StartupTime: now,
 					IsHealthy:   true,
 				},
@@ -119,11 +132,13 @@ func TestStartupTimeTieBreaker(t *testing.T) {
 			states: []*PodState{
 				{
 					PodName:     "redis-b",
+					PodUID:      "uid-b",
 					StartupTime: now,
 					IsHealthy:   true,
 				},
 				{
 					PodName:     "redis-a",
+					PodUID:      "uid-a",
 					StartupTime: now,
 					IsHealthy:   true,
 				},
@@ -135,16 +150,19 @@ func TestStartupTimeTieBreaker(t *testing.T) {
 			states: []*PodState{
 				{
 					PodName:     "redis-2",
+					PodUID:      "uid-2",
 					StartupTime: now.Add(-5 * time.Minute),
 					IsHealthy:   true,
 				},
 				{
 					PodName:     "redis-0",
+					PodUID:      "uid-0",
 					StartupTime: now.Add(-5 * time.Minute),
 					IsHealthy:   true,
 				},
 				{
 					PodName:     "redis-1",
+					PodUID:      "uid-1",
 					StartupTime: now.Add(-3 * time.Minute),
 					IsHealthy:   true,
 				},
@@ -155,9 +173,12 @@ func TestStartupTimeTieBreaker(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Sort by startup time (oldest first), then by pod name
+			// Sort by startup time (oldest first), then by pod name, then by UID
 			sort.Slice(tt.states, func(i, j int) bool {
 				if tt.states[i].StartupTime.Equal(tt.states[j].StartupTime) {
+					if tt.states[i].PodName == tt.states[j].PodName {
+						return tt.states[i].PodUID < tt.states[j].PodUID
+					}
 					return tt.states[i].PodName < tt.states[j].PodName
 				}
 				return tt.states[i].StartupTime.Before(tt.states[j].StartupTime)
@@ -166,6 +187,117 @@ func TestStartupTimeTieBreaker(t *testing.T) {
 			elected := tt.states[0]
 			if elected.PodName != tt.expected {
 				t.Errorf("Expected %s to be elected, got %s", tt.expected, elected.PodName)
+			}
+		})
+	}
+}
+
+func TestMultiSiteScenario(t *testing.T) {
+	now := time.Now()
+	tests := []struct {
+		name        string
+		states      []*PodState
+		expectedPod string
+		expectedUID string
+	}{
+		{
+			name: "same pod name different sites - UID tie-breaker",
+			states: []*PodState{
+				{
+					PodName:     "redis-0",
+					PodUID:      "uid-site2-abc",
+					Namespace:   "redis-site2",
+					StartupTime: now,
+					IsHealthy:   true,
+				},
+				{
+					PodName:     "redis-0",
+					PodUID:      "uid-site1-xyz",
+					Namespace:   "redis-site1",
+					StartupTime: now,
+					IsHealthy:   true,
+				},
+			},
+			expectedPod: "redis-0",
+			expectedUID: "uid-site1-xyz", // Lexicographically smaller
+		},
+		{
+			name: "same pod name, different startup times",
+			states: []*PodState{
+				{
+					PodName:     "redis-0",
+					PodUID:      "uid-site2",
+					Namespace:   "redis-site2",
+					StartupTime: now.Add(-5 * time.Minute),
+					IsHealthy:   true,
+				},
+				{
+					PodName:     "redis-0",
+					PodUID:      "uid-site1",
+					Namespace:   "redis-site1",
+					StartupTime: now.Add(-10 * time.Minute),
+					IsHealthy:   true,
+				},
+			},
+			expectedPod: "redis-0",
+			expectedUID: "uid-site1", // Older startup time wins
+		},
+		{
+			name: "complex multi-site with 4 pods",
+			states: []*PodState{
+				{
+					PodName:     "redis-0",
+					PodUID:      "aaa-site1",
+					Namespace:   "redis-site1",
+					StartupTime: now,
+					IsHealthy:   true,
+				},
+				{
+					PodName:     "redis-0",
+					PodUID:      "bbb-site2",
+					Namespace:   "redis-site2",
+					StartupTime: now,
+					IsHealthy:   true,
+				},
+				{
+					PodName:     "redis-1",
+					PodUID:      "ccc-site1",
+					Namespace:   "redis-site1",
+					StartupTime: now,
+					IsHealthy:   true,
+				},
+				{
+					PodName:     "redis-1",
+					PodUID:      "ddd-site2",
+					Namespace:   "redis-site2",
+					StartupTime: now,
+					IsHealthy:   true,
+				},
+			},
+			expectedPod: "redis-0", // Pod name wins first
+			expectedUID: "aaa-site1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Sort using multi-site aware logic
+			sort.Slice(tt.states, func(i, j int) bool {
+				if tt.states[i].StartupTime.Equal(tt.states[j].StartupTime) {
+					if tt.states[i].PodName == tt.states[j].PodName {
+						return tt.states[i].PodUID < tt.states[j].PodUID
+					}
+					return tt.states[i].PodName < tt.states[j].PodName
+				}
+				return tt.states[i].StartupTime.Before(tt.states[j].StartupTime)
+			})
+
+			elected := tt.states[0]
+			if elected.PodName != tt.expectedPod {
+				t.Errorf("Expected pod %s to be elected, got %s", tt.expectedPod, elected.PodName)
+			}
+			if elected.PodUID != tt.expectedUID {
+				t.Errorf("Expected UID %s to be elected, got %s", tt.expectedUID, elected.PodUID)
 			}
 		})
 	}
@@ -183,18 +315,21 @@ func TestSplitBrainResolution(t *testing.T) {
 			states: []*PodState{
 				{
 					PodName:     "redis-0",
+					PodUID:      "uid-0",
 					StartupTime: now.Add(-10 * time.Minute),
 					IsHealthy:   true,
 					IsMaster:    true,
 				},
 				{
 					PodName:     "redis-1",
+					PodUID:      "uid-1",
 					StartupTime: now.Add(-5 * time.Minute),
 					IsHealthy:   true,
 					IsMaster:    true,
 				},
 				{
 					PodName:     "redis-2",
+					PodUID:      "uid-2",
 					StartupTime: now.Add(-1 * time.Minute),
 					IsHealthy:   true,
 					IsMaster:    false,
@@ -207,18 +342,21 @@ func TestSplitBrainResolution(t *testing.T) {
 			states: []*PodState{
 				{
 					PodName:     "redis-0",
+					PodUID:      "uid-0",
 					StartupTime: now.Add(-5 * time.Minute),
 					IsHealthy:   true,
 					IsMaster:    true,
 				},
 				{
 					PodName:     "redis-1",
+					PodUID:      "uid-1",
 					StartupTime: now.Add(-10 * time.Minute),
 					IsHealthy:   true,
 					IsMaster:    true,
 				},
 				{
 					PodName:     "redis-2",
+					PodUID:      "uid-2",
 					StartupTime: now.Add(-3 * time.Minute),
 					IsHealthy:   true,
 					IsMaster:    true,
@@ -238,9 +376,12 @@ func TestSplitBrainResolution(t *testing.T) {
 				}
 			}
 
-			// Sort masters by startup time
+			// Sort masters by startup time, then pod name, then UID
 			sort.Slice(masters, func(i, j int) bool {
 				if masters[i].StartupTime.Equal(masters[j].StartupTime) {
+					if masters[i].PodName == masters[j].PodName {
+						return masters[i].PodUID < masters[j].PodUID
+					}
 					return masters[i].PodName < masters[j].PodName
 				}
 				return masters[i].StartupTime.Before(masters[j].StartupTime)
@@ -267,16 +408,19 @@ func TestHealthyPodFiltering(t *testing.T) {
 			states: []*PodState{
 				{
 					PodName:     "redis-0",
+					PodUID:      "uid-0",
 					StartupTime: now.Add(-10 * time.Minute),
 					IsHealthy:   false,
 				},
 				{
 					PodName:     "redis-1",
+					PodUID:      "uid-1",
 					StartupTime: now.Add(-5 * time.Minute),
 					IsHealthy:   true,
 				},
 				{
 					PodName:     "redis-2",
+					PodUID:      "uid-2",
 					StartupTime: now.Add(-3 * time.Minute),
 					IsHealthy:   true,
 				},
@@ -289,11 +433,13 @@ func TestHealthyPodFiltering(t *testing.T) {
 			states: []*PodState{
 				{
 					PodName:     "redis-0",
+					PodUID:      "uid-0",
 					StartupTime: now.Add(-10 * time.Minute),
 					IsHealthy:   true,
 				},
 				{
 					PodName:     "redis-1",
+					PodUID:      "uid-1",
 					StartupTime: now.Add(-5 * time.Minute),
 					IsHealthy:   true,
 				},
@@ -306,11 +452,13 @@ func TestHealthyPodFiltering(t *testing.T) {
 			states: []*PodState{
 				{
 					PodName:     "redis-0",
+					PodUID:      "uid-0",
 					StartupTime: now.Add(-10 * time.Minute),
 					IsHealthy:   false,
 				},
 				{
 					PodName:     "redis-1",
+					PodUID:      "uid-1",
 					StartupTime: now.Add(-5 * time.Minute),
 					IsHealthy:   false,
 				},
@@ -323,16 +471,19 @@ func TestHealthyPodFiltering(t *testing.T) {
 			states: []*PodState{
 				{
 					PodName:     "redis-0",
+					PodUID:      "uid-0",
 					StartupTime: now.Add(-20 * time.Minute),
 					IsHealthy:   false,
 				},
 				{
 					PodName:     "redis-1",
+					PodUID:      "uid-1",
 					StartupTime: now.Add(-10 * time.Minute),
 					IsHealthy:   true,
 				},
 				{
 					PodName:     "redis-2",
+					PodUID:      "uid-2",
 					StartupTime: now.Add(-5 * time.Minute),
 					IsHealthy:   false,
 				},
@@ -360,6 +511,9 @@ func TestHealthyPodFiltering(t *testing.T) {
 				// Sort and check first
 				sort.Slice(healthy, func(i, j int) bool {
 					if healthy[i].StartupTime.Equal(healthy[j].StartupTime) {
+						if healthy[i].PodName == healthy[j].PodName {
+							return healthy[i].PodUID < healthy[j].PodUID
+						}
 						return healthy[i].PodName < healthy[j].PodName
 					}
 					return healthy[i].StartupTime.Before(healthy[j].StartupTime)
@@ -376,40 +530,40 @@ func TestHealthyPodFiltering(t *testing.T) {
 func TestMasterCountScenarios(t *testing.T) {
 	now := time.Now()
 	tests := []struct {
-		name         string
-		states       []*PodState
-		masterCount  int
-		needsElection bool
+		name            string
+		states          []*PodState
+		masterCount     int
+		needsElection   bool
 		needsResolution bool
 	}{
 		{
 			name: "no masters",
 			states: []*PodState{
-				{PodName: "redis-0", IsMaster: false, IsHealthy: true, StartupTime: now.Add(-10 * time.Minute)},
-				{PodName: "redis-1", IsMaster: false, IsHealthy: true, StartupTime: now.Add(-5 * time.Minute)},
+				{PodName: "redis-0", PodUID: "uid-0", IsMaster: false, IsHealthy: true, StartupTime: now.Add(-10 * time.Minute)},
+				{PodName: "redis-1", PodUID: "uid-1", IsMaster: false, IsHealthy: true, StartupTime: now.Add(-5 * time.Minute)},
 			},
-			masterCount:  0,
-			needsElection: true,
+			masterCount:     0,
+			needsElection:   true,
 			needsResolution: false,
 		},
 		{
 			name: "one master",
 			states: []*PodState{
-				{PodName: "redis-0", IsMaster: true, IsHealthy: true, StartupTime: now.Add(-10 * time.Minute)},
-				{PodName: "redis-1", IsMaster: false, IsHealthy: true, StartupTime: now.Add(-5 * time.Minute)},
+				{PodName: "redis-0", PodUID: "uid-0", IsMaster: true, IsHealthy: true, StartupTime: now.Add(-10 * time.Minute)},
+				{PodName: "redis-1", PodUID: "uid-1", IsMaster: false, IsHealthy: true, StartupTime: now.Add(-5 * time.Minute)},
 			},
-			masterCount:  1,
-			needsElection: false,
+			masterCount:     1,
+			needsElection:   false,
 			needsResolution: false,
 		},
 		{
 			name: "multiple masters (split brain)",
 			states: []*PodState{
-				{PodName: "redis-0", IsMaster: true, IsHealthy: true, StartupTime: now.Add(-10 * time.Minute)},
-				{PodName: "redis-1", IsMaster: true, IsHealthy: true, StartupTime: now.Add(-5 * time.Minute)},
+				{PodName: "redis-0", PodUID: "uid-0", IsMaster: true, IsHealthy: true, StartupTime: now.Add(-10 * time.Minute)},
+				{PodName: "redis-1", PodUID: "uid-1", IsMaster: true, IsHealthy: true, StartupTime: now.Add(-5 * time.Minute)},
 			},
-			masterCount:  2,
-			needsElection: false,
+			masterCount:     2,
+			needsElection:   false,
 			needsResolution: true,
 		},
 	}
@@ -448,18 +602,18 @@ func TestEvenNumberOfReplicas(t *testing.T) {
 		expected string
 	}{
 		{
-			name:  "2 replicas",
-			count: 2,
+			name:     "2 replicas",
+			count:    2,
 			expected: "redis-0",
 		},
 		{
-			name:  "4 replicas",
-			count: 4,
+			name:     "4 replicas",
+			count:    4,
 			expected: "redis-0",
 		},
 		{
-			name:  "6 replicas",
-			count: 6,
+			name:     "6 replicas",
+			count:    6,
 			expected: "redis-0",
 		},
 	}
@@ -471,6 +625,7 @@ func TestEvenNumberOfReplicas(t *testing.T) {
 			for i := 0; i < tt.count; i++ {
 				states[i] = &PodState{
 					PodName:     "redis-" + string(rune('0'+i)),
+					PodUID:      "uid-" + string(rune('0'+i)),
 					StartupTime: now,
 					IsHealthy:   true,
 					IsMaster:    false,
@@ -480,6 +635,9 @@ func TestEvenNumberOfReplicas(t *testing.T) {
 			// Sort and elect
 			sort.Slice(states, func(i, j int) bool {
 				if states[i].StartupTime.Equal(states[j].StartupTime) {
+					if states[i].PodName == states[j].PodName {
+						return states[i].PodUID < states[j].PodUID
+					}
 					return states[i].PodName < states[j].PodName
 				}
 				return states[i].StartupTime.Before(states[j].StartupTime)
@@ -500,16 +658,19 @@ func TestStaleStateRemoval(t *testing.T) {
 	states := map[string]*PodState{
 		"redis-0": {
 			PodName:  "redis-0",
+			PodUID:   "uid-0",
 			LastSeen: now.Add(-30 * time.Second), // Fresh
 			IsHealthy: true,
 		},
 		"redis-1": {
 			PodName:  "redis-1",
+			PodUID:   "uid-1",
 			LastSeen: now.Add(-90 * time.Second), // Stale
 			IsHealthy: true,
 		},
 		"redis-2": {
 			PodName:  "redis-2",
+			PodUID:   "uid-2",
 			LastSeen: now, // Fresh
 			IsHealthy: true,
 		},
@@ -538,4 +699,3 @@ func TestStaleStateRemoval(t *testing.T) {
 		t.Error("Expected redis-2 to still exist")
 	}
 }
-
