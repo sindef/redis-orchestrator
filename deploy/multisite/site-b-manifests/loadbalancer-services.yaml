@@ -1,0 +1,48 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-master-lb
+  namespace: redis-multisite-b
+  labels:
+    app: redis
+    site: site-b
+    component: master-lb
+  annotations:
+    description: "LoadBalancer service for external access to Redis master"
+spec:
+  type: LoadBalancer
+  selector:
+    app: redis
+    site: site-b
+    redis-role: master
+  ports:
+  - name: redis
+    port: 6379
+    targetPort: 6379
+    protocol: TCP
+  sessionAffinity: None
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-readonly-lb
+  namespace: redis-multisite-b
+  labels:
+    app: redis
+    site: site-b
+    component: readonly-lb
+  annotations:
+    description: "LoadBalancer service for external read-only access to Redis replicas"
+spec:
+  type: LoadBalancer
+  selector:
+    app: redis
+    site: site-b
+    redis-role: replica
+  ports:
+  - name: redis
+    port: 6379
+    targetPort: 6379
+    protocol: TCP
+  sessionAffinity: None
+

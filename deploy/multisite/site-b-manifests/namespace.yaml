@@ -1,0 +1,9 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: redis-multisite-b
+  labels:
+    name: redis-multisite-b
+    site: site-b
+    orchestrator: redis-multisite
+

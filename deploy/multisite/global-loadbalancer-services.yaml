@@ -1,0 +1,67 @@
+# Global LoadBalancer Services
+# These services provide external access to the Redis master and readonly services
+# across all sites. They use Endpoints to route to services in different namespaces.
+#
+# Note: For true cross-namespace LoadBalancer routing, you may need to:
+# 1. Use an Ingress controller with external-dns
+# 2. Use a ServiceMesh (Istio, Linkerd, etc.)
+# 3. Use a custom solution with Endpoints/EndpointSlices
+#
+# For now, these services are created in site-a namespace and can be extended
+# to use Endpoints pointing to services in other namespaces if needed.
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-master-global-lb
+  namespace: redis-multisite-a
+  labels:
+    app: redis
+    component: master-global-lb
+    multisite: "true"
+  annotations:
+    description: "Global LoadBalancer service for external access to Redis master across all sites"
+spec:
+  type: LoadBalancer
+  # This service selects the master in site-a
+  # To route to masters across sites, you would need to create Endpoints
+  # that point to services in other namespaces, or use an Ingress/ServiceMesh
+  selector:
+    app: redis
+    site: site-a
+    redis-role: master
+  ports:
+  - name: redis
+    port: 6379
+    targetPort: 6379
+    protocol: TCP
+  sessionAffinity: None
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-readonly-global-lb
+  namespace: redis-multisite-a
+  labels:
+    app: redis
+    component: readonly-global-lb
+    multisite: "true"
+  annotations:
+    description: "Global LoadBalancer service for external read-only access across all sites"
+spec:
+  type: LoadBalancer
+  # This service selects replicas in site-a
+  # To route to replicas across sites, you would need to create Endpoints
+  # that point to services in other namespaces, or use an Ingress/ServiceMesh
+  selector:
+    app: redis
+    site: site-a
+    redis-role: replica
+  ports:
+  - name: redis
+    port: 6379
+    targetPort: 6379
+    protocol: TCP
+  sessionAffinity: None
+

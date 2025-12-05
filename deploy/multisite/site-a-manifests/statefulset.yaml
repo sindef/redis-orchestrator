@@ -2,20 +2,22 @@ apiVersion: apps/v1
 kind: StatefulSet
 metadata:
   name: redis
-  namespace: redis-raft
+  namespace: redis-multisite-a
   labels:
     app: redis
+    site: site-a
 spec:
   serviceName: redis-headless
-  # IMPORTANT: Must be odd number (3, 5, or 7) for Raft quorum
-  replicas: 3
+  replicas: 1
   selector:
     matchLabels:
       app: redis
+      site: site-a
   template:
     metadata:
       labels:
         app: redis
+        site: site-a
     spec:
       serviceAccountName: redis-orchestrator
       securityContext:
@@ -101,18 +103,15 @@ spec:
         - --redis-host=localhost
         - --redis-port=6379
         - --redis-service=redis
-        - --label-selector=app=redis
+        - --label-selector=app=redis,site=site-a
         - --sync-interval=15s
         
-        # Raft configuration
+        # Raft configuration - includes all peers across sites
         - --election-mode=raft
         - --raft-bind=0.0.0.0:7000
-        - --raft-peers=redis-0.redis-headless.redis-raft.svc.cluster.local:7000,redis-1.redis-headless.redis-raft.svc.cluster.local:7000,redis-2.redis-headless.redis-raft.svc.cluster.local:7000
+        - --raft-peers=redis-0.redis-headless.redis-multisite-a.svc.cluster.local:7000,redis-0.redis-headless.redis-multisite-b.svc.cluster.local:7000,redis-witness.redis-headless.redis-multisite-c.svc.cluster.local:7000
         - --raft-data-dir=/var/lib/raft
         - --debug=true
-        
-        # Uncomment for verbose debugging:
-        # - --debug=true
         
         env:
         - name: POD_NAME
@@ -183,24 +182,22 @@ spec:
       name: data
       labels:
         app: redis
+        site: site-a
     spec:
       accessModes: ["ReadWriteOnce"]
       resources:
         requests:
           storage: 10Gi
-      # Uncomment to use specific storage class:
-      # storageClassName: fast-ssd
   
   # Raft persistent storage
   - metadata:
       name: raft-data
       labels:
         app: redis-orchestrator
+        site: site-a
     spec:
       accessModes: ["ReadWriteOnce"]
       resources:
         requests:
           storage: 1Gi
-      # Uncomment to use specific storage class:
-      # storageClassName: fast-ssd
 
