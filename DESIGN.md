@@ -7,23 +7,35 @@ This document explains the key design decisions for the Redis Orchestrator, part
 ### The Problem
 Traditional consensus algorithms like Raft require a quorum (majority) to elect a leader, which doesn't work well with even numbers of replicas and can lead to no-leader situations during network partitions.
 
-### The Solution: Timestamp-Based Deterministic Election
+### The Solution: Three-Tier Deterministic Election
 
-We use a deterministic algorithm based on:
+We use a deterministic algorithm with three tie-breaking levels:
 1. **Startup timestamp** (oldest wins)
-2. **Pod name** (lexicographic tie-breaker)
+2. **Pod name** (lexicographic tie-breaker for single-site)
+3. **Pod UID** (lexicographic tie-breaker for multi-site)
 
 **Why this works:**
 - **Deterministic**: All instances independently calculate the same result
 - **No coordination needed**: No voting or consensus protocol required
 - **Works with any number of replicas**: 2, 3, 4, 5... doesn't matter
+- **Multi-site safe**: Handles identical pod names across different clusters
 - **Stable**: Oldest pod remains master unless it fails
 - **Fast**: Decision made in milliseconds, not requiring multiple round-trips
 
+**Multi-Site Scenario:**
+When deploying to multiple Kubernetes clusters (e.g., Site A and Site B), you may have:
+```
+Site A: redis-0 (UID: zzz-abc, started 12:00:00)
+Site B: redis-0 (UID: aaa-xyz, started 12:00:00)
+```
+
+Without the UID tie-breaker, both pods would have equal priority (same name, same time). The UID ensures a deterministic winner: `aaa-xyz` < `zzz-abc`, so Site B's redis-0 becomes master.
+
 **Trade-offs:**
 - Cannot prevent split-brain during network partition (but will resolve when connectivity restored)
-- Requires synchronized clocks (Kubernetes provides this)
-- Startup timestamp must be preserved (we store in memory, could persist if needed)
+- Requires synchronized clocks (Kubernetes provides this via NTP)
+- Startup timestamp stored in memory (could persist if needed for crash recovery)
+- UID is random, so you cannot predict which specific pod wins ties (but the outcome is consistent)
 
 ## Alternative Approaches Considered
 
@@ -133,6 +145,39 @@ Master fails → New master elected → Redis promoted → Label set → Service
 
 ## Multi-Site Architecture
 
+### The Challenge: Identical Pod Names
+
+In a multi-site deployment, both sites typically use the same StatefulSet configuration:
+```
+Site 1:  redis-0, redis-1, redis-2
+Site 2:  redis-0, redis-1, redis-2
+```
+
+This creates ambiguity if both `redis-0` pods start simultaneously. The solution is the **three-tier election** with Pod UID as the ultimate tie-breaker.
+
+### UID Tie-Breaker
+
+Kubernetes assigns each pod a unique UID (UUID) at creation time. This UID:
+- Is globally unique across all clusters
+- Never changes for the lifetime of the pod
+- Is lexicographically comparable
+- Is available via the Kubernetes API
+
+**Example Election:**
+```
+Site 1: redis-0 (UID: c8f9e7d6-..., started: 12:00:00.000)
+Site 2: redis-0 (UID: a1b2c3d4-..., started: 12:00:00.000)
+
+Winner: Site 2 (UID "a1b2c3d4" < "c8f9e7d6")
+```
+
+All orchestrators across both sites will independently:
+1. Sort candidates by (time, name, UID)
+2. Choose Site 2's redis-0
+3. Either promote themselves or configure as replica
+
+This is **deterministic** and **requires no inter-site communication during election**.
+
 ### Service Mesh Integration
 
 For multi-site deployments, we rely on service mesh (Istio/Linkerd) to:
@@ -149,6 +194,23 @@ Without service mesh:
 2. Configure DNS to resolve service across sites
 3. Longer failover times (DNS TTL)
 4. Less visibility into traffic patterns
+
+### Debug Logging for Multi-Site
+
+Enable `--debug` flag to see the election reasoning:
+
+```
+NO MASTER DETECTED - Starting election
+Election candidates count=4
+Candidate rank=1 pod=redis-0 uid=c8f9e7d6 namespace=site1 startupTime=2025-12-05T12:00:00Z
+Candidate rank=2 pod=redis-0 uid=a1b2c3d4 namespace=site2 startupTime=2025-12-05T12:00:00Z
+...
+
+ELECTED MASTER pod=redis-0 uid=a1b2c3d4 namespace=site2 
+reason=tie-breaker: pod UID (a1b2c3d4 < c8f9e7d6) - multi-site scenario
+```
+
+This makes it clear **why** a specific pod was chosen, which is critical for troubleshooting multi-site deployments.
 
 ## Security Considerations
 

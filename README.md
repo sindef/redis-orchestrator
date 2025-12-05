@@ -59,16 +59,27 @@ Every 15 seconds (configurable), each orchestrator:
 When no master is detected:
 
 1. Collect all healthy Redis instances
-2. Sort by:
-   - Primary: Startup timestamp (oldest first)
-   - Tie-breaker: Pod name (lexicographically)
-3. Elect the instance with the oldest startup time
-4. If tie, elect the one with the "smallest" pod name
+2. Sort by three-tier tie-breaking:
+   - **Primary:** Startup timestamp (oldest first)
+   - **Secondary:** Pod name (lexicographically smallest)
+   - **Tertiary:** Pod UID (lexicographically smallest) - for multi-site
+3. Elect the instance that ranks first after sorting
 
-**Why this works for even replicas:**
-- Deterministic: All instances reach the same conclusion
-- No quorum needed: Works with 2, 3, 4, or any number of replicas
-- Stable: The oldest pod is always preferred (prevents flapping)
+**Why this works for even replicas AND multi-site:**
+- **Deterministic:** All instances independently reach the same conclusion
+- **No quorum needed:** Works with 2, 3, 4, or any number of replicas
+- **Stable:** The oldest pod is always preferred (prevents flapping)
+- **Multi-site safe:** Pod UID prevents ambiguity when names are identical
+  - Example: `redis-0` in Site1 and `redis-0` in Site2 → UID breaks the tie
+
+**Multi-Site Scenario:**
+If you have `redis-0` in both Site A and Site B with identical startup times:
+```
+Site A: redis-0 (UID: zzz-abc) 
+Site B: redis-0 (UID: aaa-xyz) ← Elected (UID is smaller)
+```
+
+See [MULTI-SITE.md](MULTI-SITE.md) for detailed multi-site deployment guide.
 
 ### Split-Brain Resolution
 
@@ -137,6 +148,7 @@ kubectl run -it --rm redis-cli --image=redis:7-alpine --restart=Never -- \
 | `--pod-name` | `POD_NAME` | - | Pod name (required) |
 | `--namespace` | `POD_NAMESPACE` | - | Namespace (required) |
 | `--label-selector` | - | `app=redis` | Label selector for pods |
+| `--debug` | - | `false` | Enable verbose debug logging |
 
 ### TLS Configuration
 
@@ -170,6 +182,39 @@ kubectl apply -f deploy/multi-site-example.yaml
 - Test failover thoroughly
 - Monitor split-brain scenarios during network partitions
 - Consider using Redis Cluster for large datasets
+
+## Debug Logging
+
+Enable verbose logging to understand election decisions:
+
+```bash
+# Add to container args
+args:
+- --debug
+- --redis-host=localhost
+- --redis-port=6379
+```
+
+**Debug output includes:**
+- State sync cycle details
+- All discovered peers with UIDs
+- Election candidates and ranking
+- Decision reasoning (why a specific pod was elected)
+- Promotion/demotion actions with full context
+- Split-brain detection and resolution details
+
+**Example debug output:**
+```
+============================================
+NO MASTER DETECTED - Starting election
+Election candidates count=3
+Candidate rank=1 pod=redis-0 uid=abc-123 startupTime=2025-12-05T10:00:00Z
+Candidate rank=2 pod=redis-1 uid=def-456 startupTime=2025-12-05T10:05:00Z
+Candidate rank=3 pod=redis-2 uid=ghi-789 startupTime=2025-12-05T10:10:00Z
+
+ELECTED MASTER pod=redis-0 uid=abc-123 reason=oldest startup time
+WE ARE THE ELECTED MASTER - Promoting
+```
 
 ## Monitoring
 
@@ -298,11 +343,18 @@ MIT License - see LICENSE file for details
 ### No master elected
 
 ```bash
-# Check orchestrator logs
-kubectl logs -l app=redis -c orchestrator
+# Check orchestrator logs with debug info
+kubectl logs -l app=redis -c orchestrator | grep -E "ELECTED|NO MASTER"
+
+# Enable debug logging
+kubectl set env statefulset/redis DEBUG_FLAG="--debug" -c orchestrator
+kubectl rollout restart statefulset/redis
 
 # Check pod labels
 kubectl get pods -l app=redis --show-labels
+
+# Check pod UIDs (important for multi-site)
+kubectl get pods -o custom-columns=NAME:.metadata.name,UID:.metadata.uid
 
 # Manually check Redis state
 kubectl exec redis-0 -- redis-cli INFO replication
