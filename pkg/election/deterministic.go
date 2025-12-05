@@ -10,7 +10,6 @@ import (
 	"k8s.io/klog/v2"
 )
 
-// DeterministicStrategy implements leader election using deterministic sorting
 type DeterministicStrategy struct {
 	localPodName string
 	localPodUID  string
@@ -20,7 +19,6 @@ type DeterministicStrategy struct {
 	currentLeader *state.PodState
 }
 
-// NewDeterministicStrategy creates a new deterministic election strategy
 func NewDeterministicStrategy(podName, podUID string, debug bool) *DeterministicStrategy {
 	return &DeterministicStrategy{
 		localPodName: podName,
@@ -29,7 +27,6 @@ func NewDeterministicStrategy(podName, podUID string, debug bool) *Deterministic
 	}
 }
 
-// Start initializes the strategy
 func (d *DeterministicStrategy) Start(ctx context.Context) error {
 	if d.debug {
 		klog.Info("Started deterministic election strategy")
@@ -37,7 +34,6 @@ func (d *DeterministicStrategy) Start(ctx context.Context) error {
 	return nil
 }
 
-// Stop gracefully stops the strategy
 func (d *DeterministicStrategy) Stop() error {
 	if d.debug {
 		klog.Info("Stopped deterministic election strategy")
@@ -45,7 +41,6 @@ func (d *DeterministicStrategy) Stop() error {
 	return nil
 }
 
-// IsLeader returns true if this instance is the current leader
 func (d *DeterministicStrategy) IsLeader() bool {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
@@ -56,7 +51,6 @@ func (d *DeterministicStrategy) IsLeader() bool {
 	return d.currentLeader.PodUID == d.localPodUID
 }
 
-// GetLeader returns the current leader
 func (d *DeterministicStrategy) GetLeader() (string, string, error) {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
@@ -67,7 +61,8 @@ func (d *DeterministicStrategy) GetLeader() (string, string, error) {
 	return d.currentLeader.PodName, d.currentLeader.PodUID, nil
 }
 
-// ElectLeader performs deterministic leader election
+// ElectLeader selects the master using deterministic ordering: oldest startup time wins,
+// with pod name and UID as tie-breakers. All nodes compute the same result independently.
 func (d *DeterministicStrategy) ElectLeader(ctx context.Context, allStates []*state.PodState, localState *state.PodState) (*state.PodState, error) {
 	if len(allStates) == 0 {
 		return nil, fmt.Errorf("no healthy pods available for election")
@@ -88,10 +83,6 @@ func (d *DeterministicStrategy) ElectLeader(ctx context.Context, allStates []*st
 		}
 	}
 
-	// Sort by:
-	// 1. Startup time (oldest first)
-	// 2. Pod name (lexicographically)
-	// 3. UID (lexicographically) - for multi-site
 	sort.Slice(allStates, func(i, j int) bool {
 		if allStates[i].StartupTime.Equal(allStates[j].StartupTime) {
 			if allStates[i].PodName == allStates[j].PodName {
@@ -114,7 +105,6 @@ func (d *DeterministicStrategy) ElectLeader(ctx context.Context, allStates []*st
 			"reason", d.getElectionReason(allStates))
 	}
 
-	// Update internal state
 	d.mu.Lock()
 	d.currentLeader = elected
 	d.mu.Unlock()
@@ -122,12 +112,13 @@ func (d *DeterministicStrategy) ElectLeader(ctx context.Context, allStates []*st
 	return elected, nil
 }
 
-// Name returns the strategy name
 func (d *DeterministicStrategy) Name() string {
 	return "deterministic"
 }
 
-// getElectionReason explains why the elected leader was chosen
+// getElectionReason explains why a particular pod was elected, useful for debugging.
+// The tie-breaker chain (startup time -> pod name -> UID) handles edge cases like
+// simultaneous startups or multi-site deployments with identical pod names.
 func (d *DeterministicStrategy) getElectionReason(sortedStates []*state.PodState) string {
 	if len(sortedStates) < 2 {
 		return "only candidate"

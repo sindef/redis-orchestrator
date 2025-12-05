@@ -79,7 +79,6 @@ func TestLeaderElectionByStartupTime(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Sort by startup time (oldest first), then by pod name, then by UID
 			sort.Slice(tt.states, func(i, j int) bool {
 				if tt.states[i].StartupTime.Equal(tt.states[j].StartupTime) {
 					if tt.states[i].PodName == tt.states[j].PodName {
@@ -175,7 +174,6 @@ func TestStartupTimeTieBreaker(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Sort by startup time (oldest first), then by pod name, then by UID
 			sort.Slice(tt.states, func(i, j int) bool {
 				if tt.states[i].StartupTime.Equal(tt.states[j].StartupTime) {
 					if tt.states[i].PodName == tt.states[j].PodName {
@@ -283,7 +281,6 @@ func TestMultiSiteScenario(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Sort using multi-site aware logic
 			sort.Slice(tt.states, func(i, j int) bool {
 				if tt.states[i].StartupTime.Equal(tt.states[j].StartupTime) {
 					if tt.states[i].PodName == tt.states[j].PodName {
@@ -370,7 +367,6 @@ func TestSplitBrainResolution(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Filter only masters
 			var masters []*state.PodState
 			for _, state := range tt.states {
 				if state.IsMaster {
@@ -378,7 +374,6 @@ func TestSplitBrainResolution(t *testing.T) {
 				}
 			}
 
-			// Sort masters by startup time, then pod name, then UID
 			sort.Slice(masters, func(i, j int) bool {
 				if masters[i].StartupTime.Equal(masters[j].StartupTime) {
 					if masters[i].PodName == masters[j].PodName {
@@ -497,7 +492,6 @@ func TestHealthyPodFiltering(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Filter healthy pods
 			var healthy []*state.PodState
 			for _, state := range tt.states {
 				if state.IsHealthy {
@@ -510,7 +504,6 @@ func TestHealthyPodFiltering(t *testing.T) {
 			}
 
 			if tt.expectedCount > 0 {
-				// Sort and check first
 				sort.Slice(healthy, func(i, j int) bool {
 					if healthy[i].StartupTime.Equal(healthy[j].StartupTime) {
 						if healthy[i].PodName == healthy[j].PodName {
@@ -622,7 +615,6 @@ func TestEvenNumberOfReplicas(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Create N replicas with same startup time
 			states := make([]*state.PodState, tt.count)
 			for i := 0; i < tt.count; i++ {
 				states[i] = &state.PodState{
@@ -634,7 +626,6 @@ func TestEvenNumberOfReplicas(t *testing.T) {
 				}
 			}
 
-			// Sort and elect
 			sort.Slice(states, func(i, j int) bool {
 				if states[i].StartupTime.Equal(states[j].StartupTime) {
 					if states[i].PodName == states[j].PodName {
@@ -678,7 +669,6 @@ func TestStaleStateRemoval(t *testing.T) {
 		},
 	}
 
-	// Remove stale peers
 	for podName, state := range states {
 		if state.LastSeen.Before(staleThreshold) {
 			delete(states, podName)

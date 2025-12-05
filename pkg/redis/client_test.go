@@ -150,7 +150,6 @@ func TestParseReplicationInfoInvalidPort(t *testing.T) {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 
-	// Should not error, just skip invalid port
 	if result.MasterPort != 0 {
 		t.Errorf("Expected master port 0 for invalid input, got %d", result.MasterPort)
 	}
@@ -227,7 +226,6 @@ func TestParseReplicationInfoMasterLinkStatus(t *testing.T) {
 }
 
 func TestParseReplicationInfoRealWorldExample(t *testing.T) {
-	// Real output from Redis 7
 	input := "# Replication\r\nrole:master\r\nconnected_slaves:2\r\nslave0:ip=10.244.0.23,port=6379,state=online,offset=14706,lag=0\r\nslave1:ip=10.244.0.24,port=6379,state=online,offset=14706,lag=1\r\nmaster_failover_state:no-failover\r\nmaster_replid:8c9a4e5c7f6b1d2e3a4f5c6d7e8f9a0b1c2d3e4f\r\nmaster_replid2:0000000000000000000000000000000000000000\r\nmaster_repl_offset:14706\r\nsecond_repl_offset:-1\r\nrepl_backlog_active:1\r\nrepl_backlog_size:1048576\r\nrepl_backlog_first_byte_offset:1\r\nrepl_backlog_histlen:14706\r\n"
 
 	result, err := parseReplicationInfo(input)
@@ -261,7 +259,6 @@ func TestParseReplicationInfoSplitLines(t *testing.T) {
 	
 	lines := strings.Split(input, "\r\n")
 	
-	// Should handle both \r\n and \n
 	if len(lines) < 2 {
 		t.Error("Failed to split on \\r\\n")
 	}

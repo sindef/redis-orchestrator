@@ -12,22 +12,19 @@ import (
 	"k8s.io/klog/v2"
 )
 
-// Client wraps redis client with helper methods
 type Client struct {
 	client *redis.Client
 	useTLS bool
 }
 
-// ReplicationInfo contains Redis replication state
 type ReplicationInfo struct {
-	Role             string // "master" or "slave"
+	Role             string
 	MasterHost       string
 	MasterPort       int
 	ConnectedSlaves  int
-	MasterLinkStatus string // "up" or "down" for slaves
+	MasterLinkStatus string
 }
 
-// NewClient creates a new Redis client
 func NewClient(host string, port int, password string, useTLS bool, skipVerify bool) (*Client, error) {
 	opts := &redis.Options{
 		Addr:     fmt.Sprintf("%s:%d", host, port),
@@ -35,6 +32,8 @@ func NewClient(host string, port int, password string, useTLS bool, skipVerify b
 		DB:       0,
 	}
 
+	// TLS configuration: enforce minimum TLS 1.2 for security.
+	// SkipVerify should only be used in development/testing environments.
 	if useTLS {
 		opts.TLSConfig = &tls.Config{
 			MinVersion:         tls.VersionTLS12,
@@ -47,7 +46,8 @@ func NewClient(host string, port int, password string, useTLS bool, skipVerify b
 
 	client := redis.NewClient(opts)
 
-	// Test connection
+	// Verify connection immediately to fail fast if Redis is unreachable.
+	// This prevents creating a client that appears valid but can't actually connect.
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -63,7 +63,6 @@ func NewClient(host string, port int, password string, useTLS bool, skipVerify b
 	}, nil
 }
 
-// GetReplicationInfo retrieves the current replication state
 func (c *Client) GetReplicationInfo(ctx context.Context) (*ReplicationInfo, error) {
 	info, err := c.client.Info(ctx, "replication").Result()
 	if err != nil {
@@ -73,7 +72,8 @@ func (c *Client) GetReplicationInfo(ctx context.Context) (*ReplicationInfo, erro
 	return parseReplicationInfo(info)
 }
 
-// PromoteToMaster promotes this Redis instance to master
+// PromoteToMaster removes replication configuration, making this Redis instance
+// a standalone master. This is idempotent if already master.
 func (c *Client) PromoteToMaster(ctx context.Context) error {
 	klog.Info("Promoting local Redis to master")
 	
@@ -86,7 +86,8 @@ func (c *Client) PromoteToMaster(ctx context.Context) error {
 	return nil
 }
 
-// SetReplicaOf configures this instance as a replica
+// SetReplicaOf configures this Redis instance to replicate from the specified master.
+// If already replicating from this master, the command is effectively a no-op.
 func (c *Client) SetReplicaOf(ctx context.Context, masterHost string, masterPort int) error {
 	klog.InfoS("Configuring as replica", "masterHost", masterHost, "masterPort", masterPort)
 	
@@ -99,18 +100,17 @@ func (c *Client) SetReplicaOf(ctx context.Context, masterHost string, masterPort
 	return nil
 }
 
-// IsHealthy checks if Redis is responding
 func (c *Client) IsHealthy(ctx context.Context) bool {
 	err := c.client.Ping(ctx).Err()
 	return err == nil
 }
 
-// Close closes the Redis connection
 func (c *Client) Close() error {
 	return c.client.Close()
 }
 
-// parseReplicationInfo parses the Redis INFO replication output
+// parseReplicationInfo parses Redis INFO replication output.
+// Redis INFO format uses \r\n line endings and # for comments.
 func parseReplicationInfo(info string) (*ReplicationInfo, error) {
 	lines := strings.Split(info, "\r\n")
 	result := &ReplicationInfo{}
@@ -146,6 +146,7 @@ func parseReplicationInfo(info string) (*ReplicationInfo, error) {
 		}
 	}
 
+	// Role is required - if missing, the INFO output may be malformed or incomplete.
 	if result.Role == "" {
 		return nil, fmt.Errorf("could not parse role from replication info")
 	}

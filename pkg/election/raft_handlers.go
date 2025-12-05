@@ -10,13 +10,11 @@ import (
 	"k8s.io/klog/v2"
 )
 
-// AddVoterRequest represents a request to add a voter to the Raft cluster
 type AddVoterRequest struct {
 	ID      string `json:"id"`
 	Address string `json:"address"`
 }
 
-// HandleRaftStatus returns the current Raft status
 func (r *RaftStrategy) HandleRaftStatus(w http.ResponseWriter, req *http.Request) {
 	if r.raft == nil {
 		http.Error(w, "Raft not initialized", http.StatusServiceUnavailable)
@@ -39,14 +37,15 @@ func (r *RaftStrategy) HandleRaftStatus(w http.ResponseWriter, req *http.Request
 	json.NewEncoder(w).Encode(info)
 }
 
-// HandleAddVoter handles requests to add a new voter to the Raft cluster
+// HandleAddVoter adds a new voting member to the Raft cluster.
+// Only the current leader can add voters to maintain cluster consistency.
 func (r *RaftStrategy) HandleAddVoter(w http.ResponseWriter, req *http.Request) {
 	if r.raft == nil {
 		http.Error(w, "Raft not initialized", http.StatusServiceUnavailable)
 		return
 	}
 
-	// Only the leader can add voters
+	// Only the leader can modify cluster membership to prevent split-brain scenarios.
 	if r.raft.State() != raft.Leader {
 		leaderAddr, _ := r.raft.LeaderWithID()
 		http.Error(w, fmt.Sprintf("Not the leader, leader is: %s", leaderAddr), http.StatusBadRequest)
@@ -70,7 +69,6 @@ func (r *RaftStrategy) HandleAddVoter(w http.ResponseWriter, req *http.Request) 
 			"address", request.Address)
 	}
 
-	// Check if server is already in the cluster
 	configFuture := r.raft.GetConfiguration()
 	if err := configFuture.Error(); err != nil {
 		http.Error(w, fmt.Sprintf("Failed to get configuration: %v", err), http.StatusInternalServerError)
@@ -88,11 +86,12 @@ func (r *RaftStrategy) HandleAddVoter(w http.ResponseWriter, req *http.Request) 
 		}
 	}
 
-	// Add the voter
+	// AddVoter with 0 timeout means wait indefinitely for the new server to catch up.
+	// The 10s timeout is for the RPC call itself, not the catch-up process.
 	future := r.raft.AddVoter(
 		raft.ServerID(request.ID),
 		raft.ServerAddress(request.Address),
-		0, // prevIndex
+		0,
 		10*time.Second,
 	)
 
@@ -110,14 +109,15 @@ func (r *RaftStrategy) HandleAddVoter(w http.ResponseWriter, req *http.Request) 
 	json.NewEncoder(w).Encode(map[string]string{"status": "added"})
 }
 
-// HandleAddNonvoter handles requests to add a new non-voting member (witness) to the Raft cluster
+// HandleAddNonvoter adds a witness node (non-voting member) to the cluster.
+// Witnesses participate in elections for quorum but don't vote, useful for
+// maintaining odd cluster sizes without additional Redis instances.
 func (r *RaftStrategy) HandleAddNonvoter(w http.ResponseWriter, req *http.Request) {
 	if r.raft == nil {
 		http.Error(w, "Raft not initialized", http.StatusServiceUnavailable)
 		return
 	}
 
-	// Only the leader can add non-voters
 	if r.raft.State() != raft.Leader {
 		leaderAddr, _ := r.raft.LeaderWithID()
 		http.Error(w, fmt.Sprintf("Not the leader, leader is: %s", leaderAddr), http.StatusBadRequest)
@@ -141,13 +141,14 @@ func (r *RaftStrategy) HandleAddNonvoter(w http.ResponseWriter, req *http.Reques
 			"address", request.Address)
 	}
 
-	// Check if server is already in the cluster
 	configFuture := r.raft.GetConfiguration()
 	if err := configFuture.Error(); err != nil {
 		http.Error(w, fmt.Sprintf("Failed to get configuration: %v", err), http.StatusInternalServerError)
 		return
 	}
 
+	// Check if server is already a member to make the operation idempotent.
+	// This prevents errors when retrying join requests.
 	for _, server := range configFuture.Configuration().Servers {
 		if server.ID == raft.ServerID(request.ID) {
 			if r.debug {
@@ -159,11 +160,10 @@ func (r *RaftStrategy) HandleAddNonvoter(w http.ResponseWriter, req *http.Reques
 		}
 	}
 
-	// Add as non-voter (witness can vote but cannot become leader)
 	future := r.raft.AddNonvoter(
 		raft.ServerID(request.ID),
 		raft.ServerAddress(request.Address),
-		0, // prevIndex
+		0,
 		10*time.Second,
 	)
 
@@ -181,7 +181,6 @@ func (r *RaftStrategy) HandleAddNonvoter(w http.ResponseWriter, req *http.Reques
 	json.NewEncoder(w).Encode(map[string]string{"status": "added"})
 }
 
-// HandleRaftPeers returns the current Raft peer configuration
 func (r *RaftStrategy) HandleRaftPeers(w http.ResponseWriter, req *http.Request) {
 	if r.raft == nil {
 		http.Error(w, "Raft not initialized", http.StatusServiceUnavailable)

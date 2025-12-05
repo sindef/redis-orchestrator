@@ -148,7 +148,6 @@ func TestAddVoterRequest(t *testing.T) {
 		t.Error("Address should not be empty")
 	}
 
-	// Test validation
 	if req.ID == "" || req.Address == "" {
 		t.Error("Request should be valid")
 	}

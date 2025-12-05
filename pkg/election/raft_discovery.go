@@ -12,7 +12,6 @@ import (
 	"k8s.io/klog/v2"
 )
 
-// RaftClusterInfo contains information about an existing Raft cluster
 type RaftClusterInfo struct {
 	LeaderAddr string   `json:"leader_addr"`
 	LeaderID   string   `json:"leader_id"`
@@ -22,15 +21,15 @@ type RaftClusterInfo struct {
 	Peers      []string `json:"peers"`
 }
 
-// DiscoverCluster attempts to find an existing Raft cluster
+// DiscoverCluster queries peers to find an existing Raft cluster and its leader.
+// Returns cluster info if found, allowing new nodes to join without manual configuration.
 func (r *RaftStrategy) DiscoverCluster(ctx context.Context, peerAddrs []string) (*RaftClusterInfo, error) {
 	klog.InfoS("Discovery: Looking for existing Raft cluster", 
 		"peerCount", len(peerAddrs),
 		"peers", peerAddrs)
 
-	// Try each peer to find the leader
+	// Try each peer until we find one that responds with cluster information.
 	for _, peerAddr := range peerAddrs {
-		// Extract IP from peer address (format: hostname:port or ip:port)
 		host, _, err := splitHostPort(peerAddr)
 		if err != nil {
 			klog.InfoS("Discovery: Failed to parse peer address", "peer", peerAddr, "error", err)
@@ -39,7 +38,6 @@ func (r *RaftStrategy) DiscoverCluster(ctx context.Context, peerAddrs []string) 
 		
 		klog.V(2).InfoS("Discovery: Querying peer", "peer", peerAddr, "host", host)
 
-		// Query the peer's Raft status (using orchestrator HTTP port 8080)
 		url := fmt.Sprintf("http://%s:8080/raft/status", host)
 		
 		reqCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
@@ -50,7 +48,6 @@ func (r *RaftStrategy) DiscoverCluster(ctx context.Context, peerAddrs []string) 
 			continue
 		}
 
-		// Add authentication if authenticator is provided
 		if r.authenticator != nil {
 			if err := r.authenticator.SignRequest(req); err != nil {
 				klog.InfoS("Discovery: Failed to sign request", "peer", peerAddr, "error", err)
@@ -91,7 +88,7 @@ func (r *RaftStrategy) DiscoverCluster(ctx context.Context, peerAddrs []string) 
 			"peerLeader", info.LeaderAddr,
 			"peerID", info.PodUID)
 
-		// If this peer knows about a leader, we found a cluster
+		// If peer reports a leader, we found the cluster.
 		if info.LeaderAddr != "" {
 			klog.InfoS("✅ Discovery: Found existing Raft cluster",
 				"queriedPeer", peerAddr,
@@ -101,9 +98,8 @@ func (r *RaftStrategy) DiscoverCluster(ctx context.Context, peerAddrs []string) 
 			return &info, nil
 		}
 
-		// Even if this peer is the leader itself, that's a cluster
+		// If the queried peer is itself the leader, use its address.
 		if info.State == "Leader" {
-			// Construct leader address from peer address
 			info.LeaderAddr = peerAddr
 			klog.InfoS("✅ Discovery: Found leader directly",
 				"peer", peerAddr,
@@ -117,13 +113,14 @@ func (r *RaftStrategy) DiscoverCluster(ctx context.Context, peerAddrs []string) 
 	return nil, fmt.Errorf("no existing Raft cluster found")
 }
 
-// JoinCluster attempts to join an existing Raft cluster
+// JoinCluster requests membership in the Raft cluster by calling the leader's add endpoint.
+// Standalone nodes join as non-voters (witnesses), regular nodes join as voters.
 func (r *RaftStrategy) JoinCluster(ctx context.Context, leaderAddr string) error {
 	if r.raft == nil {
 		return fmt.Errorf("Raft not initialized")
 	}
 
-	// Get our advertise address
+	// Advertise address must use pod IP, not bind address, so leader can reach us.
 	_, port, _ := splitHostPort(r.bindAddr)
 	localAdvertise := fmt.Sprintf("%s:%s", r.localPodIP, port)
 
@@ -134,8 +131,7 @@ func (r *RaftStrategy) JoinCluster(ctx context.Context, leaderAddr string) error
 			"ourAddr", localAdvertise)
 	}
 
-	// Contact the leader to request joining
-	// Witness nodes join as non-voters, regular nodes join as voters
+	// Choose endpoint based on node type: witnesses don't vote but help with quorum.
 	var endpoint string
 	if r.standalone {
 		endpoint = "/raft/add-nonvoter"
@@ -163,7 +159,6 @@ func (r *RaftStrategy) JoinCluster(ctx context.Context, leaderAddr string) error
 	}
 	req.Header.Set("Content-Type", "application/json")
 
-	// Add authentication if authenticator is provided
 	if r.authenticator != nil {
 		if err := r.authenticator.SignRequest(req); err != nil {
 			return fmt.Errorf("failed to sign join request: %w", err)
@@ -185,11 +180,11 @@ func (r *RaftStrategy) JoinCluster(ctx context.Context, leaderAddr string) error
 	return nil
 }
 
-// splitHostPort splits a host:port string
+// splitHostPort parses an address, defaulting to port 7000 if not specified.
+// This handles both "host:port" and "host" formats for peer addresses.
 func splitHostPort(addr string) (host, port string, err error) {
-	// Handle cases where addr might just be hostname
 	if !strings.Contains(addr, ":") {
-		return addr, "7000", nil // Default Raft port
+		return addr, "7000", nil
 	}
 	
 	host, port, err = net.SplitHostPort(addr)

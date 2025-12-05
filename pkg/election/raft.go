@@ -18,7 +18,6 @@ import (
 	"k8s.io/klog/v2"
 )
 
-// RaftStrategy implements leader election using Raft consensus
 type RaftStrategy struct {
 	localPodName  string
 	localPodUID   string
@@ -28,7 +27,7 @@ type RaftStrategy struct {
 	dataDir       string
 	debug         bool
 	bootstrap     bool
-	standalone    bool // If true, this is a witness node (non-voting)
+	standalone    bool
 	authenticator *auth.Authenticator
 	
 	raft          *raft.Raft
@@ -37,7 +36,6 @@ type RaftStrategy struct {
 	allStates     map[string]*state.PodState
 }
 
-// NewRaftStrategy creates a new Raft-based election strategy
 func NewRaftStrategy(podName, podUID, podIP, bindAddr string, peers []string, dataDir string, bootstrap, debug, standalone bool, authenticator *auth.Authenticator) *RaftStrategy {
 	return &RaftStrategy{
 		localPodName:  podName,
@@ -54,7 +52,6 @@ func NewRaftStrategy(podName, podUID, podIP, bindAddr string, peers []string, da
 	}
 }
 
-// Start initializes the Raft consensus system
 func (r *RaftStrategy) Start(ctx context.Context) error {
 	if r.debug {
 		klog.InfoS("Starting Raft election strategy (v1.1.0 - auto-discovery)", 
@@ -64,12 +61,12 @@ func (r *RaftStrategy) Start(ctx context.Context) error {
 			"bootstrap", r.bootstrap)
 	}
 
-	// Ensure data directory exists
 	if err := os.MkdirAll(r.dataDir, 0755); err != nil {
 		return fmt.Errorf("failed to create Raft data directory: %w", err)
 	}
 
-	// Create Raft configuration
+	// Use pod UID as Raft server ID to ensure uniqueness even if pods are recreated
+	// with the same name. This prevents ID conflicts during pod restarts.
 	config := raft.DefaultConfig()
 	config.LocalID = raft.ServerID(r.localPodUID)
 	
@@ -79,14 +76,13 @@ func (r *RaftStrategy) Start(ctx context.Context) error {
 		config.LogLevel = "INFO"
 	}
 
-	// Setup Raft transport
-	// Parse bind address to get port
+	// Advertise address uses pod IP (not bind address) so other pods can reach us.
+	// Bind address may be 0.0.0.0, but peers need the actual pod IP for connections.
 	_, bindPort, err := net.SplitHostPort(r.bindAddr)
 	if err != nil {
 		return fmt.Errorf("failed to parse bind address: %w", err)
 	}
 
-	// Create advertise address using pod IP
 	advertiseAddr := net.JoinHostPort(r.localPodIP, bindPort)
 	
 	if r.debug {
@@ -95,37 +91,31 @@ func (r *RaftStrategy) Start(ctx context.Context) error {
 			"advertiseAddr", advertiseAddr)
 	}
 
-	// Resolve advertise address
 	tcpAddr, err := net.ResolveTCPAddr("tcp", advertiseAddr)
 	if err != nil {
 		return fmt.Errorf("failed to resolve advertise address: %w", err)
 	}
 
-	// Create transport: bind to 0.0.0.0 but advertise pod IP
 	transport, err := raft.NewTCPTransport(r.bindAddr, tcpAddr, 3, 10*time.Second, os.Stderr)
 	if err != nil {
 		return fmt.Errorf("failed to create Raft transport: %w", err)
 	}
 
-	// Create snapshot store
 	snapshots, err := raft.NewFileSnapshotStore(r.dataDir, 2, os.Stderr)
 	if err != nil {
 		return fmt.Errorf("failed to create snapshot store: %w", err)
 	}
 
-	// Create log store
 	logStore, err := raftboltdb.NewBoltStore(filepath.Join(r.dataDir, "raft-log.db"))
 	if err != nil {
 		return fmt.Errorf("failed to create log store: %w", err)
 	}
 
-	// Create stable store
 	stableStore, err := raftboltdb.NewBoltStore(filepath.Join(r.dataDir, "raft-stable.db"))
 	if err != nil {
 		return fmt.Errorf("failed to create stable store: %w", err)
 	}
 
-	// Create the Raft system
 	fsm := &raftFSM{strategy: r}
 	ra, err := raft.NewRaft(config, fsm, logStore, stableStore, snapshots, transport)
 	if err != nil {
@@ -134,7 +124,8 @@ func (r *RaftStrategy) Start(ctx context.Context) error {
 
 	r.raft = ra
 
-	// Check if we have existing state
+	// Check for existing Raft state to determine if this is a new node or rejoining.
+	// LastIndex > 0 indicates the node has participated in a cluster before.
 	hasExistingState := ra.LastIndex() > 0
 	
 	if r.debug {
@@ -144,19 +135,12 @@ func (r *RaftStrategy) Start(ctx context.Context) error {
 			"bootstrap", r.bootstrap)
 	}
 
-	// Bootstrap cluster only if:
-	// 1. No existing state (first run)
-	// 2. Bootstrap flag is set (typically only on pod-0)
-	// 3. We have peers configured
-	// 4. We're not in standalone/witness mode (witness nodes can't bootstrap)
+	// Bootstrap only if: no existing state, bootstrap flag set, peers configured, and not standalone.
+	// Standalone nodes join as non-voters, so they shouldn't bootstrap.
 	if !hasExistingState && r.bootstrap && len(r.peers) > 0 && !r.standalone {
-		// Get port from bind address for advertise address
 		_, port, _ := net.SplitHostPort(r.bindAddr)
 		localAdvertise := net.JoinHostPort(r.localPodIP, port)
 		
-		// Build server list - need to know UIDs of all servers
-		// For now, use a simplified approach: bootstrap with just ourselves
-		// and let other nodes join via AddVoter (future enhancement)
 		configuration := raft.Configuration{
 			Servers: []raft.Server{
 				{
@@ -176,9 +160,10 @@ func (r *RaftStrategy) Start(ctx context.Context) error {
 			klog.Warning("For production, manually bootstrap with all servers or use auto-discovery.")
 		}
 
+		// Bootstrap creates a single-node cluster. Other nodes will join via auto-join
+		// or manual API calls. ErrCantBootstrap is expected if state already exists.
 		future := ra.BootstrapCluster(configuration)
 		if err := future.Error(); err != nil {
-			// Bootstrap may fail if cluster already exists
 			if err == raft.ErrCantBootstrap {
 				klog.Info("Cluster already bootstrapped")
 			} else {
@@ -205,31 +190,31 @@ func (r *RaftStrategy) Start(ctx context.Context) error {
 		klog.Info("Raft started successfully")
 	}
 
-	// Start monitoring leadership
+	// Monitor leadership changes for debugging and state tracking.
 	go r.monitorLeadership(ctx)
 
-	// If we didn't bootstrap and have no existing state, try to discover and join cluster
-	// Witness nodes can also join (as non-voters)
+	// Auto-join attempts to discover and join an existing cluster if:
+	// - No existing state (new node)
+	// - Not bootstrapping (would create new cluster)
+	// - Peers configured (knows where to look)
+	// Standalone nodes also auto-join but as non-voters.
 	if !hasExistingState && !r.bootstrap && len(r.peers) > 0 {
 		go r.autoJoinCluster(ctx)
 	} else if r.standalone && !hasExistingState && len(r.peers) > 0 {
-		// Witness nodes that haven't joined yet
 		go r.autoJoinCluster(ctx)
 	}
 
 	return nil
 }
 
-// autoJoinCluster attempts to discover and join an existing Raft cluster
+// autoJoinCluster attempts to discover and join an existing Raft cluster.
+// It retries with exponential backoff to handle cases where the cluster is still forming.
 func (r *RaftStrategy) autoJoinCluster(ctx context.Context) {
-	// Wait a bit for:
-	// 1. HTTP server to start on all pods
-	// 2. Bootstrap node to complete bootstrap
-	// 3. DNS to propagate
+	// Initial delay allows bootstrap node to start and become leader.
 	klog.InfoS("Auto-join: Waiting for cluster to form", "waitTime", "10s")
 	time.Sleep(10 * time.Second)
 
-	maxAttempts := 18 // Try for ~90 seconds (5s between attempts)
+	maxAttempts := 18
 	for attempt := 0; attempt < maxAttempts; attempt++ {
 		select {
 		case <-ctx.Done():
@@ -237,7 +222,8 @@ func (r *RaftStrategy) autoJoinCluster(ctx context.Context) {
 		default:
 		}
 
-		// Check if we've already joined
+		// Check if we've already joined (have a leader or are not a follower).
+		// This handles race conditions where another process joined us.
 		leaderAddr, leaderID := r.raft.LeaderWithID()
 		if r.raft.State() != raft.Follower || leaderAddr != "" {
 			klog.InfoS("Auto-join: Already in cluster", 
@@ -252,7 +238,6 @@ func (r *RaftStrategy) autoJoinCluster(ctx context.Context) {
 			"of", maxAttempts,
 			"currentState", r.raft.State().String())
 
-		// Try to discover existing cluster
 		klog.InfoS("Auto-join: Starting discovery", "peers", r.peers)
 		clusterInfo, err := r.DiscoverCluster(ctx, r.peers)
 		if err != nil {
@@ -264,7 +249,6 @@ func (r *RaftStrategy) autoJoinCluster(ctx context.Context) {
 			continue
 		}
 
-		// Found a cluster! Try to join
 		klog.InfoS("Auto-join: Found cluster, requesting join", 
 			"leaderAddr", clusterInfo.LeaderAddr,
 			"leaderID", clusterInfo.LeaderID[:8],
@@ -278,12 +262,10 @@ func (r *RaftStrategy) autoJoinCluster(ctx context.Context) {
 			continue
 		}
 
-		// Successfully joined!
 		klog.InfoS("✅ Successfully auto-joined Raft cluster", 
 			"leader", clusterInfo.LeaderAddr,
 			"attempt", attempt+1)
 		
-		// Wait a moment and verify we're in the cluster
 		time.Sleep(2 * time.Second)
 		newLeaderAddr, newLeaderID := r.raft.LeaderWithID()
 		klog.InfoS("Post-join verification",
@@ -297,7 +279,6 @@ func (r *RaftStrategy) autoJoinCluster(ctx context.Context) {
 	klog.Warning("This node will participate in elections but not join existing cluster")
 }
 
-// Stop gracefully stops the Raft system
 func (r *RaftStrategy) Stop() error {
 	if r.raft != nil {
 		if r.debug {
@@ -308,7 +289,6 @@ func (r *RaftStrategy) Stop() error {
 	return nil
 }
 
-// IsLeader returns true if this instance is the current Raft leader
 func (r *RaftStrategy) IsLeader() bool {
 	if r.raft == nil {
 		return false
@@ -316,7 +296,6 @@ func (r *RaftStrategy) IsLeader() bool {
 	return r.raft.State() == raft.Leader
 }
 
-// GetLeader returns the current leader
 func (r *RaftStrategy) GetLeader() (string, string, error) {
 	if r.raft == nil {
 		return "", "", fmt.Errorf("Raft not initialized")
@@ -330,31 +309,28 @@ func (r *RaftStrategy) GetLeader() (string, string, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	// Try to find the leader in our state map
 	for _, st := range r.allStates {
 		if st.PodUID == string(leaderID) {
 			return st.PodName, st.PodUID, nil
 		}
 	}
 
-	// Return the Raft leader ID if we don't have pod info
 	return string(leaderID), string(leaderID), nil
 }
 
-// ElectLeader with Raft doesn't do election per call - it uses continuous consensus
-// This method updates our view of the cluster state
+// ElectLeader returns the current Raft leader by matching leader ID to pod states.
+// This bridges Raft's internal leader election to the orchestrator's pod-based view.
 func (r *RaftStrategy) ElectLeader(ctx context.Context, allStates []*state.PodState, localState *state.PodState) (*state.PodState, error) {
-	// Update our internal state map
+	// Update internal state map for leader lookup.
 	r.mu.Lock()
 	for _, st := range allStates {
 		r.allStates[st.PodUID] = st
 	}
 	r.mu.Unlock()
 
-	// The leader is determined by Raft, not by us
-	// Get the current Raft leader
 	leaderAddr, leaderID := r.raft.LeaderWithID()
 	
+	// No leader means cluster is still electing or partitioned.
 	if leaderAddr == "" {
 		if r.debug {
 			klog.Warning("No Raft leader currently elected")
@@ -362,7 +338,6 @@ func (r *RaftStrategy) ElectLeader(ctx context.Context, allStates []*state.PodSt
 		return nil, fmt.Errorf("no Raft leader")
 	}
 
-	// Find the leader state
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	
@@ -379,7 +354,6 @@ func (r *RaftStrategy) ElectLeader(ctx context.Context, allStates []*state.PodSt
 		}
 	}
 
-	// If we can't find the leader in our states, use local as fallback if we're the leader
 	if r.IsLeader() {
 		if r.debug {
 			klog.Info("We are the Raft leader")
@@ -391,12 +365,10 @@ func (r *RaftStrategy) ElectLeader(ctx context.Context, allStates []*state.PodSt
 	return nil, fmt.Errorf("Raft leader not found in pod states")
 }
 
-// Name returns the strategy name
 func (r *RaftStrategy) Name() string {
 	return "raft"
 }
 
-// monitorLeadership watches for leadership changes
 func (r *RaftStrategy) monitorLeadership(ctx context.Context) {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
@@ -419,29 +391,29 @@ func (r *RaftStrategy) monitorLeadership(ctx context.Context) {
 	}
 }
 
-// raftFSM implements the Raft finite state machine
+// raftFSM is a minimal Raft FSM. We only use Raft for leader election,
+// not for state machine replication, so these methods are no-ops.
+// The FSM is required by the Raft library but not used for our use case.
 type raftFSM struct {
 	strategy *RaftStrategy
 }
 
 func (f *raftFSM) Apply(log *raft.Log) interface{} {
-	// For now, we don't need to apply any commands
-	// The leadership itself is what we care about
 	return nil
 }
 
 func (f *raftFSM) Snapshot() (raft.FSMSnapshot, error) {
-	// No state to snapshot for now
 	return &raftFSMSnapshot{}, nil
 }
 
 func (f *raftFSM) Restore(snapshot io.ReadCloser) error {
-	// No state to restore for now
 	return nil
 }
 
 type raftFSMSnapshot struct{}
 
+// Persist cancels immediately since we don't need to persist state.
+// This is safe because we only use Raft for leadership, not state replication.
 func (f *raftFSMSnapshot) Persist(sink raft.SnapshotSink) error {
 	return sink.Cancel()
 }
