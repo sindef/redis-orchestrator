@@ -79,20 +79,20 @@ func New(cfg *config.Config, kubeClient kubernetes.Interface) (*Orchestrator, er
 	// Determine the node IP for Raft: use LoadBalancer external IP if configured,
 	// otherwise fall back to pod IP.
 	nodeIP := pod.Status.PodIP
-	if cfg.LBServiceName != "" {
-		lbIP, err := discoverLoadBalancerIP(kubeClient, cfg.Namespace, cfg.PodName, cfg.LBServiceName)
+	if cfg.DiscoverLBService {
+		lbIP, svcName, err := discoverLoadBalancerIP(kubeClient, cfg.Namespace, cfg.PodName)
 		if err != nil {
-			return nil, fmt.Errorf("failed to discover LoadBalancer IP for service %s: %w", cfg.LBServiceName, err)
+			return nil, fmt.Errorf("failed to discover LoadBalancer IP: %w", err)
 		}
 		if lbIP != "" {
 			nodeIP = lbIP
 			klog.InfoS("Using LoadBalancer external IP for Raft node",
-				"service", cfg.LBServiceName,
+				"service", svcName,
 				"externalIP", lbIP,
 				"podIP", pod.Status.PodIP)
-		} else {
+		} else if svcName != "" {
 			klog.InfoS("LoadBalancer service found but no external IP yet, using pod IP",
-				"service", cfg.LBServiceName,
+				"service", svcName,
 				"podIP", pod.Status.PodIP)
 		}
 	}
@@ -127,7 +127,7 @@ func New(cfg *config.Config, kubeClient kubernetes.Interface) (*Orchestrator, er
 			"bindAddr", cfg.RaftBindAddr,
 			"peers", cfg.RaftPeers,
 			"bootstrap", cfg.RaftBootstrap,
-			"lbService", cfg.LBServiceName)
+			"discoverLBService", cfg.DiscoverLBService)
 	default:
 		return nil, fmt.Errorf("unknown election mode: %s", cfg.ElectionMode)
 	}
@@ -896,60 +896,69 @@ func (o *Orchestrator) shutdown() error {
 	return nil
 }
 
-// discoverLoadBalancerIP finds a LoadBalancer service that points only to the current pod
-// and returns its external IP. The service must have a selector that matches the pod.
-func discoverLoadBalancerIP(kubeClient kubernetes.Interface, namespace, podName, serviceName string) (string, error) {
-	// Get the service
-	svc, err := kubeClient.CoreV1().Services(namespace).Get(
-		context.Background(),
-		serviceName,
-		metav1.GetOptions{},
-	)
-	if err != nil {
-		return "", fmt.Errorf("failed to get service %s: %w", serviceName, err)
-	}
-
-	// Verify it's a LoadBalancer service
-	if svc.Spec.Type != corev1.ServiceTypeLoadBalancer {
-		return "", fmt.Errorf("service %s is not a LoadBalancer service (type: %s)", serviceName, svc.Spec.Type)
-	}
-
-	// Get the current pod to verify the service selector matches
+// discoverLoadBalancerIP discovers a LoadBalancer service that has a pod-name label selector
+// matching the current pod and returns its external IP. Returns the IP, service name, and error.
+func discoverLoadBalancerIP(kubeClient kubernetes.Interface, namespace, podName string) (string, string, error) {
+	// Get the current pod to check its labels
 	pod, err := kubeClient.CoreV1().Pods(namespace).Get(
 		context.Background(),
 		podName,
 		metav1.GetOptions{},
 	)
 	if err != nil {
-		return "", fmt.Errorf("failed to get pod %s: %w", podName, err)
+		return "", "", fmt.Errorf("failed to get pod %s: %w", podName, err)
 	}
 
-	// Verify the service selector matches the pod labels, with special check for pod name/index
-	if !matchesSelectorWithPodName(pod.Labels, svc.Spec.Selector, podName) {
-		return "", fmt.Errorf("service %s selector does not match pod %s labels or pod name/index", serviceName, podName)
+	// List all services in the namespace
+	services, err := kubeClient.CoreV1().Services(namespace).List(
+		context.Background(),
+		metav1.ListOptions{},
+	)
+	if err != nil {
+		return "", "", fmt.Errorf("failed to list services: %w", err)
 	}
 
-	// Get the external IP from the LoadBalancer status
-	if len(svc.Status.LoadBalancer.Ingress) == 0 {
-		// No external IP assigned yet - return empty string (caller will use pod IP)
-		return "", nil
+	// Find LoadBalancer services that match this pod via pod-name selector
+	for _, svc := range services.Items {
+		// Only consider LoadBalancer services
+		if svc.Spec.Type != corev1.ServiceTypeLoadBalancer {
+			continue
+		}
+
+		// Check if the service selector matches the pod, with special check for pod name
+		if !matchesSelectorWithPodName(pod.Labels, svc.Spec.Selector, podName) {
+			continue
+		}
+
+		// Found a matching service - get the external IP
+		if len(svc.Status.LoadBalancer.Ingress) == 0 {
+			// No external IP assigned yet - return empty string (caller will use pod IP)
+			klog.InfoS("LoadBalancer service found but no external IP yet",
+				"service", svc.Name,
+				"pod", podName)
+			return "", svc.Name, nil
+		}
+
+		ingress := svc.Status.LoadBalancer.Ingress[0]
+		if ingress.IP != "" {
+			return ingress.IP, svc.Name, nil
+		}
+		if ingress.Hostname != "" {
+			// Some cloud providers use hostname instead of IP
+			// For now, return empty and let caller use pod IP
+			// In the future, we could resolve the hostname to IP
+			klog.InfoS("LoadBalancer has hostname instead of IP",
+				"service", svc.Name,
+				"hostname", ingress.Hostname)
+			return "", svc.Name, nil
+		}
 	}
 
-	ingress := svc.Status.LoadBalancer.Ingress[0]
-	if ingress.IP != "" {
-		return ingress.IP, nil
-	}
-	if ingress.Hostname != "" {
-		// Some cloud providers use hostname instead of IP
-		// For now, return empty and let caller use pod IP
-		// In the future, we could resolve the hostname to IP
-		klog.InfoS("LoadBalancer has hostname instead of IP",
-			"service", serviceName,
-			"hostname", ingress.Hostname)
-		return "", nil
-	}
-
-	return "", nil
+	// No matching LoadBalancer service found
+	klog.InfoS("No LoadBalancer service found with pod-name selector",
+		"pod", podName,
+		"namespace", namespace)
+	return "", "", nil
 }
 
 // matchesSelectorWithPodName checks if the pod labels match the service selector,
@@ -964,6 +973,7 @@ func matchesSelectorWithPodName(podLabels map[string]string, selector map[string
 	podNameMatched := false
 	podNameSelectorKeys := []string{
 		"statefulset.kubernetes.io/pod-name", // Kubernetes StatefulSet pod name label
+		"pod-name",                           // Pod name label selector
 		"pod",                                // Custom pod label
 	}
 

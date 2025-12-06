@@ -32,7 +32,7 @@ type Config struct {
 	RaftPeers       []string
 	RaftDataDir     string
 	RaftBootstrap   bool
-	LBServiceName   string // LoadBalancer service name for discovering external IP
+	DiscoverLBService bool // If true, discover LoadBalancer service with pod-name label selector
 	
 	SharedSecret string
 	
