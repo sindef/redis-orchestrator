@@ -135,42 +135,75 @@ func (r *RaftStrategy) Start(ctx context.Context) error {
 			"bootstrap", r.bootstrap)
 	}
 
-	// Bootstrap only if: no existing state, bootstrap flag set, peers configured, and not standalone.
-	// Standalone nodes join as non-voters, so they shouldn't bootstrap.
+	// Before bootstrapping, check if an existing cluster exists by trying to discover it.
+	// This prevents multiple sites from creating separate clusters.
+	// Only bootstrap if no existing cluster is found.
 	if !hasExistingState && r.bootstrap && len(r.peers) > 0 && !r.standalone {
-		_, port, _ := net.SplitHostPort(r.bindAddr)
-		localAdvertise := net.JoinHostPort(r.localPodIP, port)
+		// Try to discover an existing cluster first
+		klog.InfoS("Bootstrap requested - checking for existing cluster first", "peers", len(r.peers))
+		discoverCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		clusterInfo, err := r.DiscoverCluster(discoverCtx, r.peers)
+		cancel()
 		
-		configuration := raft.Configuration{
-			Servers: []raft.Server{
-				{
-					ID:       raft.ServerID(r.localPodUID),
-					Address:  raft.ServerAddress(localAdvertise),
-					Suffrage: raft.Voter,
-				},
-			},
-		}
-
-		if r.debug {
-			klog.InfoS("Bootstrapping Raft cluster", 
-				"localID", r.localPodUID[:8],
-				"localAddress", localAdvertise,
-				"servers", len(configuration.Servers))
-			klog.Warning("Note: Bootstrap creates single-node cluster. Other nodes will need to join.")
-			klog.Warning("For production, manually bootstrap with all servers or use auto-discovery.")
-		}
-
-		// Bootstrap creates a single-node cluster. Other nodes will join via auto-join
-		// or manual API calls. ErrCantBootstrap is expected if state already exists.
-		future := ra.BootstrapCluster(configuration)
-		if err := future.Error(); err != nil {
-			if err == raft.ErrCantBootstrap {
-				klog.Info("Cluster already bootstrapped")
+		shouldBootstrap := true
+		if err == nil && clusterInfo != nil {
+			// Found an existing cluster - join it instead of bootstrapping
+			klog.InfoS("Found existing Raft cluster - joining instead of bootstrapping",
+				"leaderAddr", clusterInfo.LeaderAddr,
+				"leaderPod", clusterInfo.PodName)
+			
+			// Join the existing cluster
+			joinCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			if err := r.JoinCluster(joinCtx, clusterInfo.LeaderAddr); err != nil {
+				klog.ErrorS(err, "Failed to join existing cluster, will bootstrap new cluster")
+				// Fall through to bootstrap
 			} else {
-				klog.ErrorS(err, "Bootstrap failed")
+				klog.Info("✅ Successfully joined existing Raft cluster")
+				shouldBootstrap = false
 			}
+			cancel()
 		} else {
-			klog.Info("✅ Successfully bootstrapped Raft cluster")
+			if r.debug {
+				klog.InfoS("No existing cluster found - proceeding with bootstrap", "error", err)
+			}
+		}
+		
+		// Bootstrap only if we didn't successfully join an existing cluster
+		if shouldBootstrap {
+			// No existing cluster found - bootstrap a new one
+			_, port, _ := net.SplitHostPort(r.bindAddr)
+			localAdvertise := net.JoinHostPort(r.localPodIP, port)
+			
+			configuration := raft.Configuration{
+				Servers: []raft.Server{
+					{
+						ID:       raft.ServerID(r.localPodUID),
+						Address:  raft.ServerAddress(localAdvertise),
+						Suffrage: raft.Voter,
+					},
+				},
+			}
+
+			if r.debug {
+				klog.InfoS("Bootstrapping new Raft cluster", 
+					"localID", r.localPodUID[:8],
+					"localAddress", localAdvertise,
+					"servers", len(configuration.Servers))
+				klog.Warning("Note: Bootstrap creates single-node cluster. Other nodes will need to join.")
+			}
+
+			// Bootstrap creates a single-node cluster. Other nodes will join via auto-join
+			// or manual API calls. ErrCantBootstrap is expected if state already exists.
+			future := ra.BootstrapCluster(configuration)
+			if err := future.Error(); err != nil {
+				if err == raft.ErrCantBootstrap {
+					klog.Info("Cluster already bootstrapped")
+				} else {
+					klog.ErrorS(err, "Bootstrap failed")
+				}
+			} else {
+				klog.Info("✅ Successfully bootstrapped Raft cluster")
+			}
 		}
 	} else {
 		if r.debug {

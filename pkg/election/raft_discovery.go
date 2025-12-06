@@ -36,7 +36,7 @@ func (r *RaftStrategy) DiscoverCluster(ctx context.Context, peerAddrs []string) 
 			continue
 		}
 		
-		klog.V(2).InfoS("Discovery: Querying peer", "peer", peerAddr, "host", host)
+		klog.InfoS("Discovery: Querying peer", "peer", peerAddr, "host", host, "url", fmt.Sprintf("http://%s:8080/raft/status", host))
 
 		url := fmt.Sprintf("http://%s:8080/raft/status", host)
 		

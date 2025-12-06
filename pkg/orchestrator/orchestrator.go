@@ -80,20 +80,59 @@ func New(cfg *config.Config, kubeClient kubernetes.Interface) (*Orchestrator, er
 	// otherwise fall back to pod IP.
 	nodeIP := pod.Status.PodIP
 	if cfg.DiscoverLBService {
-		lbIP, svcName, err := discoverLoadBalancerIP(kubeClient, cfg.Namespace, cfg.PodName)
-		if err != nil {
-			return nil, fmt.Errorf("failed to discover LoadBalancer IP: %w", err)
-		}
-		if lbIP != "" {
-			nodeIP = lbIP
-			klog.InfoS("Using LoadBalancer external IP for Raft node",
-				"service", svcName,
-				"externalIP", lbIP,
-				"podIP", pod.Status.PodIP)
-		} else if svcName != "" {
-			klog.InfoS("LoadBalancer service found but no external IP yet, using pod IP",
-				"service", svcName,
-				"podIP", pod.Status.PodIP)
+		// Retry LoadBalancer discovery with backoff - LoadBalancer IPs can take time to be assigned
+		var lbIP, svcName string
+		var err error
+		maxRetries := 12
+		retryDelay := 5 * time.Second
+		
+		for attempt := 0; attempt < maxRetries; attempt++ {
+			lbIP, svcName, err = discoverLoadBalancerIP(kubeClient, cfg.Namespace, cfg.PodName)
+			if err != nil {
+				klog.InfoS("LoadBalancer discovery failed, will retry",
+					"attempt", attempt+1,
+					"maxRetries", maxRetries,
+					"error", err)
+				if attempt < maxRetries-1 {
+					time.Sleep(retryDelay)
+					continue
+				}
+				return nil, fmt.Errorf("failed to discover LoadBalancer IP after %d attempts: %w", maxRetries, err)
+			}
+			
+			if lbIP != "" {
+				nodeIP = lbIP
+				klog.InfoS("Using LoadBalancer external IP for Raft node",
+					"service", svcName,
+					"externalIP", lbIP,
+					"podIP", pod.Status.PodIP,
+					"attempt", attempt+1)
+				break
+			}
+			
+			if svcName != "" {
+				klog.InfoS("LoadBalancer service found but no external IP yet, waiting",
+					"service", svcName,
+					"podIP", pod.Status.PodIP,
+					"attempt", attempt+1,
+					"maxRetries", maxRetries)
+				if attempt < maxRetries-1 {
+					time.Sleep(retryDelay)
+					continue
+				}
+				// After all retries, fall back to pod IP but log warning
+				klog.Warning("LoadBalancer service found but external IP not assigned after retries, using pod IP",
+					"service", svcName,
+					"podIP", pod.Status.PodIP,
+					"warning", "Cross-cluster peering may not work correctly")
+			} else {
+				// No service found - this is unexpected if flag is set
+				klog.Warning("LoadBalancer discovery enabled but no matching service found",
+					"pod", cfg.PodName,
+					"namespace", cfg.Namespace,
+					"fallingBackToPodIP", pod.Status.PodIP)
+				break
+			}
 		}
 	}
 
