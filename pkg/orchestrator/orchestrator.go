@@ -76,6 +76,27 @@ func New(cfg *config.Config, kubeClient kubernetes.Interface) (*Orchestrator, er
 		return nil, fmt.Errorf("failed to get pod: %w", err)
 	}
 
+	// Determine the node IP for Raft: use LoadBalancer external IP if configured,
+	// otherwise fall back to pod IP.
+	nodeIP := pod.Status.PodIP
+	if cfg.LBServiceName != "" {
+		lbIP, err := discoverLoadBalancerIP(kubeClient, cfg.Namespace, cfg.PodName, cfg.LBServiceName)
+		if err != nil {
+			return nil, fmt.Errorf("failed to discover LoadBalancer IP for service %s: %w", cfg.LBServiceName, err)
+		}
+		if lbIP != "" {
+			nodeIP = lbIP
+			klog.InfoS("Using LoadBalancer external IP for Raft node",
+				"service", cfg.LBServiceName,
+				"externalIP", lbIP,
+				"podIP", pod.Status.PodIP)
+		} else {
+			klog.InfoS("LoadBalancer service found but no external IP yet, using pod IP",
+				"service", cfg.LBServiceName,
+				"podIP", pod.Status.PodIP)
+		}
+	}
+
 	authenticator := auth.New(cfg.SharedSecret)
 
 	var electionStrategy election.Strategy
@@ -91,7 +112,7 @@ func New(cfg *config.Config, kubeClient kubernetes.Interface) (*Orchestrator, er
 		electionStrategy = election.NewRaftStrategy(
 			cfg.PodName,
 			string(pod.UID),
-			pod.Status.PodIP,
+			nodeIP,
 			cfg.RaftBindAddr,
 			cfg.RaftPeers,
 			cfg.RaftDataDir,
@@ -100,11 +121,13 @@ func New(cfg *config.Config, kubeClient kubernetes.Interface) (*Orchestrator, er
 			cfg.Standalone,
 			authenticator,
 		)
-		klog.InfoS("Using Raft election strategy", 
+		klog.InfoS("Using Raft election strategy",
+			"nodeIP", nodeIP,
 			"podIP", pod.Status.PodIP,
 			"bindAddr", cfg.RaftBindAddr,
 			"peers", cfg.RaftPeers,
-			"bootstrap", cfg.RaftBootstrap)
+			"bootstrap", cfg.RaftBootstrap,
+			"lbService", cfg.LBServiceName)
 	default:
 		return nil, fmt.Errorf("unknown election mode: %s", cfg.ElectionMode)
 	}
@@ -127,8 +150,8 @@ func New(cfg *config.Config, kubeClient kubernetes.Interface) (*Orchestrator, er
 }
 
 func (o *Orchestrator) Run(ctx context.Context) error {
-	klog.InfoS("Starting orchestrator", 
-		"pod", o.config.PodName, 
+	klog.InfoS("Starting orchestrator",
+		"pod", o.config.PodName,
 		"startupTime", o.startupTime,
 		"electionMode", o.config.ElectionMode)
 
@@ -527,7 +550,7 @@ func (o *Orchestrator) handleSingleMaster(ctx context.Context, master *state.Pod
 			"masterNamespace", master.Namespace,
 			"weAreMaster", master.PodUID == o.podUID)
 	}
-	
+
 	if master.PodUID == o.podUID {
 		if o.config.Debug {
 			klog.Info("We are the master - ensuring label is set")
@@ -562,7 +585,7 @@ func (o *Orchestrator) handleRaftMode(ctx context.Context, localState *state.Pod
 	}
 
 	isRaftLeader := o.electionStrategy.IsLeader()
-	
+
 	if o.config.Debug {
 		klog.InfoS("Raft mode reconciliation",
 			"isRaftLeader", isRaftLeader,
@@ -797,7 +820,7 @@ func (o *Orchestrator) removeMasterLabel(ctx context.Context) error {
 
 func (o *Orchestrator) setupHTTPServer() {
 	mux := http.NewServeMux()
-	
+
 	mux.HandleFunc("/state", o.authenticator.Middleware(o.handleStateRequest))
 	mux.HandleFunc("/health", o.handleHealthRequest)
 
@@ -814,7 +837,7 @@ func (o *Orchestrator) setupHTTPServer() {
 			mux.HandleFunc("/raft/add-voter", o.authenticator.Middleware(raftStrategy.HandleAddVoter))
 			mux.HandleFunc("/raft/add-nonvoter", o.authenticator.Middleware(raftStrategy.HandleAddNonvoter))
 			mux.HandleFunc("/raft/peers", o.authenticator.Middleware(raftStrategy.HandleRaftPeers))
-			
+
 			if o.config.Debug {
 				klog.Info("Registered Raft HTTP endpoints: /raft/status, /raft/add-voter, /raft/add-nonvoter, /raft/peers")
 			}
@@ -871,4 +894,110 @@ func (o *Orchestrator) shutdown() error {
 	}
 
 	return nil
+}
+
+// discoverLoadBalancerIP finds a LoadBalancer service that points only to the current pod
+// and returns its external IP. The service must have a selector that matches the pod.
+func discoverLoadBalancerIP(kubeClient kubernetes.Interface, namespace, podName, serviceName string) (string, error) {
+	// Get the service
+	svc, err := kubeClient.CoreV1().Services(namespace).Get(
+		context.Background(),
+		serviceName,
+		metav1.GetOptions{},
+	)
+	if err != nil {
+		return "", fmt.Errorf("failed to get service %s: %w", serviceName, err)
+	}
+
+	// Verify it's a LoadBalancer service
+	if svc.Spec.Type != corev1.ServiceTypeLoadBalancer {
+		return "", fmt.Errorf("service %s is not a LoadBalancer service (type: %s)", serviceName, svc.Spec.Type)
+	}
+
+	// Get the current pod to verify the service selector matches
+	pod, err := kubeClient.CoreV1().Pods(namespace).Get(
+		context.Background(),
+		podName,
+		metav1.GetOptions{},
+	)
+	if err != nil {
+		return "", fmt.Errorf("failed to get pod %s: %w", podName, err)
+	}
+
+	// Verify the service selector matches the pod labels, with special check for pod name/index
+	if !matchesSelectorWithPodName(pod.Labels, svc.Spec.Selector, podName) {
+		return "", fmt.Errorf("service %s selector does not match pod %s labels or pod name/index", serviceName, podName)
+	}
+
+	// Get the external IP from the LoadBalancer status
+	if len(svc.Status.LoadBalancer.Ingress) == 0 {
+		// No external IP assigned yet - return empty string (caller will use pod IP)
+		return "", nil
+	}
+
+	ingress := svc.Status.LoadBalancer.Ingress[0]
+	if ingress.IP != "" {
+		return ingress.IP, nil
+	}
+	if ingress.Hostname != "" {
+		// Some cloud providers use hostname instead of IP
+		// For now, return empty and let caller use pod IP
+		// In the future, we could resolve the hostname to IP
+		klog.InfoS("LoadBalancer has hostname instead of IP",
+			"service", serviceName,
+			"hostname", ingress.Hostname)
+		return "", nil
+	}
+
+	return "", nil
+}
+
+// matchesSelectorWithPodName checks if the pod labels match the service selector,
+// with a special requirement that one of the selectors must specifically match the pod name/index.
+// This ensures the LoadBalancer service is bound to this specific pod, not just any pod matching other labels.
+func matchesSelectorWithPodName(podLabels map[string]string, selector map[string]string, podName string) bool {
+	if len(selector) == 0 {
+		return false
+	}
+
+	// Check for pod name/index matching in common selector keys
+	podNameMatched := false
+	podNameSelectorKeys := []string{
+		"statefulset.kubernetes.io/pod-name", // Kubernetes StatefulSet pod name label
+		"pod",                                // Custom pod label
+	}
+
+	// First, verify all selectors match
+	for key, value := range selector {
+		if podLabels[key] != value {
+			return false
+		}
+		// Check if this selector key is one that should match the pod name
+		for _, podKey := range podNameSelectorKeys {
+			if key == podKey && value == podName {
+				podNameMatched = true
+				break
+			}
+		}
+	}
+
+	// Require that at least one selector specifically matches the pod name/index
+	if !podNameMatched {
+		// Check if any selector value matches the pod name (fallback check)
+		for _, value := range selector {
+			if value == podName {
+				podNameMatched = true
+				break
+			}
+		}
+	}
+
+	if !podNameMatched {
+		klog.InfoS("Service selector does not include pod name/index match",
+			"podName", podName,
+			"selector", selector)
+		return false
+	}
+
+	return true
 }

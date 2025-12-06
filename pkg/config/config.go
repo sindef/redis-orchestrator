@@ -32,6 +32,7 @@ type Config struct {
 	RaftPeers       []string
 	RaftDataDir     string
 	RaftBootstrap   bool
+	LBServiceName   string // LoadBalancer service name for discovering external IP
 	
 	SharedSecret string
 	

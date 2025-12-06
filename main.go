@@ -43,6 +43,7 @@ func main() {
 	flag.StringVar(&raftPeersStr, "raft-peers", "", "Comma-separated list of Raft peer addresses (e.g., pod-0:7000,pod-1:7000)")
 	flag.StringVar(&cfg.RaftDataDir, "raft-data-dir", "/var/lib/redis-orchestrator/raft", "Directory for Raft data storage")
 	flag.BoolVar(&raftBootstrapSet, "raft-bootstrap", false, "Bootstrap Raft cluster (auto-detected if not set)")
+	flag.StringVar(&cfg.LBServiceName, "lb-service", "", "LoadBalancer service name to discover external IP for Raft (e.g., redis-0-lb)")
 	
 	flag.StringVar(&cfg.SharedSecret, "shared-secret", os.Getenv("SHARED_SECRET"), "Shared secret for peer authentication")
 	
