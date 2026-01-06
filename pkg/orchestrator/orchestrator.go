@@ -493,7 +493,9 @@ func (o *Orchestrator) handleNoMaster(ctx context.Context, allStates []*state.Po
 			}
 			return o.demoteToReplica(ctx)
 		}
-		return nil
+		// Even if no master is detected, check and fix replication if we're a replica
+		// This handles cases where the master changed and replication needs to be reinitialized
+		return o.checkAndFixReplication(ctx, localState)
 	}
 
 	if o.config.Debug {
@@ -647,7 +649,8 @@ func (o *Orchestrator) handleSingleMaster(ctx context.Context, master *state.Pod
 		klog.Info("Correctly configured as replica")
 	}
 
-	return nil
+	// Check if replication is healthy and reinitialize if needed
+	return o.checkAndFixReplication(ctx, localState)
 }
 
 func (o *Orchestrator) handleRaftMode(ctx context.Context, localState *state.PodState) error {
@@ -723,7 +726,9 @@ func (o *Orchestrator) handleRaftMode(ctx context.Context, localState *state.Pod
 	if o.config.Debug {
 		klog.Info("Correctly configured as replica (not Raft leader)")
 	}
-	return nil
+	
+	// Check if replication is healthy and reinitialize if needed
+	return o.checkAndFixReplication(ctx, localState)
 }
 
 func (o *Orchestrator) handleSplitBrain(ctx context.Context, allStates []*state.PodState, localState *state.PodState) error {
@@ -814,6 +819,11 @@ func (o *Orchestrator) handleSplitBrain(ctx context.Context, allStates []*state.
 		}
 	}
 
+	// If we're a replica, check if replication is healthy and reinitialize if needed
+	if !localState.IsMaster {
+		return o.checkAndFixReplication(ctx, localState)
+	}
+
 	return nil
 }
 
@@ -875,6 +885,73 @@ func (o *Orchestrator) demoteToReplica(ctx context.Context) error {
 	}
 
 	return o.redisClient.SetReplicaOf(ctx, masterService, o.config.RedisPort)
+}
+
+// checkAndFixReplication checks if replication is healthy for a replica.
+// If master_link_status is "down", it reinitializes replication to handle
+// cases where the master changed (e.g., after failover).
+func (o *Orchestrator) checkAndFixReplication(ctx context.Context, localState *state.PodState) error {
+	// Only check replication for replicas, not masters
+	if localState.IsMaster {
+		return nil
+	}
+
+	// Skip if standalone mode (not managing Redis)
+	if o.config.Standalone {
+		return nil
+	}
+
+	// Get current replication info
+	info, err := o.redisClient.GetReplicationInfo(ctx)
+	if err != nil {
+		klog.ErrorS(err, "Failed to get replication info for health check")
+		return nil // Don't fail reconciliation if we can't check
+	}
+
+	// Check if replication link is down
+	if info.MasterLinkStatus == "down" {
+		if o.config.Debug {
+			klog.Warning("Replication link is down - reinitializing replication",
+				"masterHost", info.MasterHost,
+				"masterPort", info.MasterPort,
+				"masterLinkStatus", info.MasterLinkStatus)
+		} else {
+			klog.Warning("Replication link is down - reinitializing replication")
+		}
+
+		// Use master-service if set, otherwise fall back to redis-service
+		masterService := o.config.MasterServiceName
+		if masterService == "" {
+			masterService = o.config.RedisServiceName
+		}
+
+		// Reinitialize replication - this will reconnect to the master
+		// even if the master's IP changed (e.g., after failover)
+		if err := o.redisClient.SetReplicaOf(ctx, masterService, o.config.RedisPort); err != nil {
+			// Log the error but don't fail reconciliation - this allows the orchestrator
+			// to continue with other operations and retry replication fix on the next sync cycle.
+			// Common reasons for failure: master temporarily unavailable, network issues, etc.
+			klog.ErrorS(err, "Failed to reinitialize replication - will retry on next sync cycle",
+				"masterService", masterService,
+				"port", o.config.RedisPort,
+				"masterLinkStatus", info.MasterLinkStatus)
+			// Return nil to allow reconciliation to continue - replication will be retried next cycle
+			return nil
+		}
+
+		if o.config.Debug {
+			klog.Info("Successfully reinitialized replication")
+		} else {
+			klog.Info("Reinitialized replication after detecting link failure")
+		}
+	} else if o.config.Debug {
+		klog.V(2).InfoS("Replication link is healthy",
+			"masterLinkStatus", info.MasterLinkStatus,
+			"masterHost", info.MasterHost,
+			"masterPort", info.MasterPort)
+	}
+
+	return nil
 }
 
 func (o *Orchestrator) ensureMasterLabel(ctx context.Context) error {
