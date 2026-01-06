@@ -420,17 +420,4 @@ redis-orchestrator/
 └── Dockerfile               # Container build
 ```
 
-## License
-
-[Add your license here]
-
-## Contributing
-
-[Add contribution guidelines here]
-
-## Support
-
-For issues and questions:
-- GitHub Issues: [Add link]
-- Documentation: [Add link]
 

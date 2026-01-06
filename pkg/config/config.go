@@ -20,6 +20,7 @@ type Config struct {
 	RedisTLSSkipVerify bool
 	
 	RedisServiceName string
+	MasterServiceName string // Service name for replication. If set, used instead of RedisServiceName.
 	
 	SyncInterval time.Duration
 	
@@ -39,6 +40,10 @@ type Config struct {
 	// Standalone enables witness mode: participates in Raft elections but
 	// doesn't manage Redis. Useful for maintaining quorum without extra Redis instances.
 	Standalone bool
+	
+	// NoPromote disables master promotion and pod labeling. Replication is still configured.
+	// Designed for standby sites that should never become masters.
+	NoPromote bool
 	
 	Debug bool
 }

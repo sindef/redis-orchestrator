@@ -32,6 +32,7 @@ func main() {
 	flag.BoolVar(&cfg.RedisTLS, "redis-tls", false, "Use TLS for Redis connection")
 	flag.BoolVar(&cfg.RedisTLSSkipVerify, "redis-tls-skip-verify", false, "Skip TLS certificate verification (use --redis-tls-skip-verify=true)")
 	flag.StringVar(&cfg.RedisServiceName, "redis-service", "redis", "Redis service name for replica configuration")
+	flag.StringVar(&cfg.MasterServiceName, "master-service", "", "Service name to replicate from. If set, used instead of --redis-service. Useful when --redis-service is only for discovery.")
 	flag.DurationVar(&cfg.SyncInterval, "sync-interval", 15*time.Second, "Interval between state syncs")
 
 	flag.StringVar(&cfg.PodName, "pod-name", os.Getenv("POD_NAME"), "Pod name (from downward API)")
@@ -48,6 +49,8 @@ func main() {
 	flag.StringVar(&cfg.SharedSecret, "shared-secret", os.Getenv("SHARED_SECRET"), "Shared secret for peer authentication")
 
 	flag.BoolVar(&cfg.Standalone, "standalone", false, "Run as Raft witness without managing Redis (use --standalone=true)")
+
+	flag.BoolVar(&cfg.NoPromote, "no-promote", false, "Disable master promotion and pod labeling (use --no-promote=true). Replication is still configured. Designed for standby sites.")
 
 	flag.BoolVar(&cfg.Debug, "debug", false, "Enable debug logging (use --debug=true)")
 	flag.Parse()
@@ -77,7 +80,8 @@ func main() {
 		"version", version,
 		"pod", cfg.PodName,
 		"namespace", cfg.Namespace,
-		"electionMode", cfg.ElectionMode)
+		"electionMode", cfg.ElectionMode,
+		"noPromote", cfg.NoPromote)
 
 	if cfg.PodName == "" {
 		klog.Fatal("POD_NAME is required")

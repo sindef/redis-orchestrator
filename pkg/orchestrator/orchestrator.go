@@ -477,6 +477,25 @@ func (o *Orchestrator) handleNoMaster(ctx context.Context, allStates []*state.Po
 		return nil
 	}
 
+	if o.config.NoPromote {
+		if o.config.Debug {
+			klog.Info("========================================")
+			klog.Info("NO MASTER DETECTED - --no-promote is set, waiting for master to become available")
+		} else {
+			klog.Info("No master found, but --no-promote is set - waiting for master to become available")
+		}
+		// If we're currently master, that's wrong - demote ourselves
+		if localState.IsMaster {
+			if o.config.Debug {
+				klog.Warning("We are master but --no-promote is set - demoting to replica")
+			} else {
+				klog.Warning("We are master but --no-promote is set - demoting")
+			}
+			return o.demoteToReplica(ctx)
+		}
+		return nil
+	}
+
 	if o.config.Debug {
 		klog.Info("========================================")
 		klog.Info("NO MASTER DETECTED - Starting election")
@@ -521,11 +540,19 @@ func (o *Orchestrator) handleNoMaster(ctx context.Context, allStates []*state.Po
 	}
 
 	if elected.PodUID == o.podUID {
-		if o.config.Debug {
-			klog.Info("WE ARE THE ELECTED MASTER - Promoting")
-		}
-		if err := o.promoteToMaster(ctx); err != nil {
-			return fmt.Errorf("failed to promote to master: %w", err)
+		if o.config.NoPromote {
+			if o.config.Debug {
+				klog.Info("WE ARE THE ELECTED MASTER - but --no-promote is set, skipping promotion")
+			} else {
+				klog.Info("Elected as master but --no-promote is set, skipping promotion")
+			}
+		} else {
+			if o.config.Debug {
+				klog.Info("WE ARE THE ELECTED MASTER - Promoting")
+			}
+			if err := o.promoteToMaster(ctx); err != nil {
+				return fmt.Errorf("failed to promote to master: %w", err)
+			}
 		}
 	} else {
 		if o.config.Debug {
@@ -591,6 +618,14 @@ func (o *Orchestrator) handleSingleMaster(ctx context.Context, master *state.Pod
 	}
 
 	if master.PodUID == o.podUID {
+		if o.config.NoPromote {
+			if o.config.Debug {
+				klog.Warning("We are the master but --no-promote is set - demoting to replica")
+			} else {
+				klog.Warning("We are master but --no-promote is set - demoting")
+			}
+			return o.demoteToReplica(ctx)
+		}
 		if o.config.Debug {
 			klog.Info("We are the master - ensuring label is set")
 		}
@@ -629,6 +664,25 @@ func (o *Orchestrator) handleRaftMode(ctx context.Context, localState *state.Pod
 		klog.InfoS("Raft mode reconciliation",
 			"isRaftLeader", isRaftLeader,
 			"localIsMaster", localState.IsMaster)
+	}
+
+	if o.config.NoPromote {
+		// With --no-promote, we should never be master
+		if localState.IsMaster {
+			if o.config.Debug {
+				klog.Warning("We are master but --no-promote is set - demoting to replica")
+			} else {
+				klog.Warning("We are master but --no-promote is set - demoting")
+			}
+			return o.demoteToReplica(ctx)
+		}
+		// If we're Raft leader but not master, that's fine - we just don't promote
+		if isRaftLeader {
+			if o.config.Debug {
+				klog.Info("We are the Raft leader but --no-promote is set, skipping promotion")
+			}
+		}
+		return nil
 	}
 
 	if isRaftLeader {
@@ -736,9 +790,18 @@ func (o *Orchestrator) handleSplitBrain(ctx context.Context, allStates []*state.
 
 	// Split-brain resolution: if we're a master but not the chosen one, demote.
 	// The chosen master is determined by the same deterministic ordering used in elections.
-	if localState.IsMaster && localState.PodUID != keepMaster.PodUID {
+	// Also demote if --no-promote is set (we should never be master).
+	if localState.IsMaster && (localState.PodUID != keepMaster.PodUID || o.config.NoPromote) {
 		if o.config.Debug {
-			klog.Warning("WE MUST DEMOTE - We are not the chosen master")
+			if o.config.NoPromote {
+				klog.Warning("WE MUST DEMOTE - --no-promote is set, we should not be master")
+			} else {
+				klog.Warning("WE MUST DEMOTE - We are not the chosen master")
+			}
+		} else {
+			if o.config.NoPromote {
+				klog.Warning("We are master but --no-promote is set - demoting")
+			}
 		}
 		return o.demoteToReplica(ctx)
 	}
@@ -755,6 +818,13 @@ func (o *Orchestrator) handleSplitBrain(ctx context.Context, allStates []*state.
 }
 
 func (o *Orchestrator) promoteToMaster(ctx context.Context) error {
+	if o.config.NoPromote {
+		if o.config.Debug {
+			klog.Info("promoteToMaster called but --no-promote is set, skipping")
+		}
+		return nil
+	}
+
 	if o.config.Debug {
 		klog.Info("========================================")
 		klog.InfoS("PROMOTING TO MASTER",
@@ -777,13 +847,19 @@ func (o *Orchestrator) promoteToMaster(ctx context.Context) error {
 }
 
 func (o *Orchestrator) demoteToReplica(ctx context.Context) error {
+	// Use master-service if set, otherwise fall back to redis-service
+	masterService := o.config.MasterServiceName
+	if masterService == "" {
+		masterService = o.config.RedisServiceName
+	}
+
 	if o.config.Debug {
 		klog.Info("========================================")
 		klog.InfoS("DEMOTING TO REPLICA",
 			"pod", o.config.PodName,
 			"uid", o.podUID,
 			"namespace", o.config.Namespace,
-			"masterService", o.config.RedisServiceName)
+			"masterService", masterService)
 	} else {
 		klog.Info("Demoting to replica")
 	}
@@ -794,14 +870,21 @@ func (o *Orchestrator) demoteToReplica(ctx context.Context) error {
 
 	if o.config.Debug {
 		klog.InfoS("Removed master label, configuring replication",
-			"masterService", o.config.RedisServiceName,
+			"masterService", masterService,
 			"port", o.config.RedisPort)
 	}
 
-	return o.redisClient.SetReplicaOf(ctx, o.config.RedisServiceName, o.config.RedisPort)
+	return o.redisClient.SetReplicaOf(ctx, masterService, o.config.RedisPort)
 }
 
 func (o *Orchestrator) ensureMasterLabel(ctx context.Context) error {
+	if o.config.NoPromote {
+		if o.config.Debug {
+			klog.Info("ensureMasterLabel called but --no-promote is set, skipping")
+		}
+		return nil
+	}
+
 	pod, err := o.kubeClient.CoreV1().Pods(o.config.Namespace).Get(
 		ctx,
 		o.config.PodName,
